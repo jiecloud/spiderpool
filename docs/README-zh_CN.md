@@ -10,9 +10,9 @@ Spiderpool 是一个 kubernetes 的 underlay 网络解决方案，它提供了�
 
 为什么希望研发 Spiderpool ?  当前开源社区中并未提供全面、友好、智能的 underlay 网络解决方案，Spiderpool 因此提供了很多创新的功能：
 
-* 丰富的 IPAM 能力。提供共享、独享的 IP 池，支持应用固定 IP 地址，满足防火墙的安全管控等需求。 通过监控应用编排事件，自动化管理独享的 IP 池，实现固定 IP 地址的动态创建、扩容、缩容和回收，实现零运维。
+* 丰富的 IPAM 能力。提供共享、独享的 IP 池，支持应用固定 IP 地址，自动化管理独享的 IP 池，实现固定 IP 地址的动态创建、扩容、缩容和回收等。
 
-* overlay CNI 和 underlay CNI 协同，POD 具备多种 CNI 网卡。Spiderpool 能够定制多 underlay CNI 网卡的 IP 地址，调协所有网卡之间的路由，以确保请求向和回复向数据路径一致而避免丢包，能够使得 POD 同时具备 underlay CNI 和 overlay CNI 的网卡。多 CNI 协同能有效降低集群节点的硬件一致要求。
+* overlay CNI 和 underlay CNI 协同，POD 具备多种 CNI 网卡。Spiderpool 能够定制多个 underlay CNI 网卡的 IP 地址，调协所有网卡之间的策略路由，以确保请求向和回复向数据路径一致而避免丢包。多 CNI 协同能有效降低集群节点的硬件一致要求。
 
 * 增强了开源社区中的 underlay CNI，如[Macvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/macvlan),
   [ipvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/ipvlan),
@@ -28,15 +28,15 @@ Spiderpool 是一个 kubernetes 的 underlay 网络解决方案，它提供了�
 
 [文章](./concepts/solution-zh_CN.md) 对两种方案的 IPAM 和网络性能做了简单比较，能够更好说明 Spiderpool 的特点和使用场景。
 
-为什么需要 underlay 网络解决方案？在数据中心的场景下，存在很多应用场景：
+为什么需要 underlay 网络解决方案？存在很多应用场景：
 
-* 低延时应用的需求，underlay 网络方案的网络延时和吞吐量会优于 overlay 网络方案
+* 高性能网络需求的应用，underlay 网络方案能比 overlay 网络方案提供低网络延时、高吞吐量的优势。
 
-* 传统主机应用上云初期，还沿用传统网络的对接方式，例如服务暴露和发现、多子网对接等
+* 传统的主机应用，通过主机 IP 来直接暴露服务，不能接受 NAT 映射，或者业务已经基于 VLAN 子网进行了分离。它们在上云初期，underlay 网络方案能够提供较低的云化网络迁移成本。
 
-* 数据中心网络管理的需求，希望使用防火墙、vlan 隔离等手段对应用实施安全管控，希望使用传统的网络观测手段实施集群网络监控
+* 网络安全的管控需求，例如基于防火墙、VLAN 隔离等手段实施网络安全管控，例如使用传统的网络观测手段实施集群网络监控。
 
-* 实施独立的宿主机网卡规划，保障底层子网带宽隔离，例如 [kubevirt](https://github.com/kubevirt/kubevirt) 、存储项目、日志项目，传输数据时可保证独立的网络带宽。
+* underlay 网络方案能够灵活定制应用接入的 VLAN 子网，不同业务的应用因此可实施独立的子网规划，保障底层子网的业务带宽隔离，适用于如 [kubevirt](https://github.com/kubevirt/kubevirt) 、CSI 存储项目、日志采集项目等。
 
 ## 架构
 
@@ -168,7 +168,7 @@ spiderpool 提供了节点拓扑的 IP 池功能，与虚拟机的相同 IP 分�
 
 * 可以通过 IP 池和 POD annotaiton 等多种方式定制自定义路由，可参考 [例子](./usage/route.md)
 
-* 支持以最佳实践方式来便捷生成 [Multus](https://github.com/k8snetworkplumbingwg/multus-cni) CR 实例，避免了人工书写 CNI 配置错误。[例子](./concepts/mulltus-zh_CN.md)
+* 以最佳实践的 CNI 配置来便捷地生成 [Multus](https://github.com/k8snetworkplumbingwg/multus-cni) NetworkAttachmentDefinition 实例，并且保证其正确的 JSON 格式来提高使用体验。[例子](./concepts/mulltus-zh_CN.md)
 
 * 应用可设置多个 IP 池，实现 IP 资源的备用效果。可参考 [例子](./usage/ippool-multi.md)
 
