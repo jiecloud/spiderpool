@@ -5,10 +5,14 @@ package common
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/spidernet-io/spiderpool/pkg/constant"
+	"github.com/spidernet-io/spiderpool/pkg/utils/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/hashicorp/go-multierror"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	e2e "github.com/spidernet-io/e2eframework/framework"
@@ -47,7 +51,14 @@ func GenerateExamplePodYaml(podName, namespace string) *corev1.Pod {
 func CreatePodUntilReady(frame *e2e.Framework, podYaml *corev1.Pod, podName, namespace string, waitPodStartTimeout time.Duration) (pod *corev1.Pod, podIPv4, podIPv6 string) {
 	// create pod
 	GinkgoWriter.Printf("create pod %v/%v \n", namespace, podName)
-	err := frame.CreatePod(podYaml)
+	err := retry.RetryOnConflictWithContext(context.Background(), retry.DefaultBackoff, func(ctx context.Context) error {
+		err := frame.CreatePod(podYaml)
+		if err != nil {
+			GinkgoLogr.Error(fmt.Errorf("failed to create pod %v/%v, error: %v", namespace, podName, err), "Failed")
+			return err
+		}
+		return nil
+	})
 	Expect(err).NotTo(HaveOccurred(), "failed to create pod")
 
 	// wait for pod ip
@@ -122,4 +133,53 @@ func CheckPodIpReadyByLabel(frame *e2e.Framework, label map[string]string, v4Poo
 	Expect(ok).To(BeTrue())
 	GinkgoWriter.Printf("Pod IP recorded in IPPool %v , %v \n", v4PoolNameList, v6PoolNameList)
 	return podList
+}
+
+func DeletePods(frame *e2e.Framework, opts ...client.DeleteAllOfOption) error {
+	return frame.KClient.DeleteAllOf(context.TODO(), &corev1.Pod{}, opts...)
+}
+
+func ValidatePodIPConflict(podList *corev1.PodList) error {
+	isIPConflictMap := make(map[string]string)
+	for _, pod := range podList.Items {
+		for _, ip := range pod.Status.PodIPs {
+			ipStr := ip.IP
+			if existingPod, ok := isIPConflictMap[ipStr]; ok {
+				return fmt.Errorf("the ip address: %v of pod %v conflicts with the ip address: %v of pod %v", ipStr, existingPod, ipStr, pod.Name)
+			}
+			isIPConflictMap[ipStr] = pod.Name
+		}
+	}
+	return nil
+}
+
+func GetPodNetworkInfo(ctx context.Context, frame *e2e.Framework, podList *corev1.PodList) error {
+	var jobResult *multierror.Error
+	for _, pod := range podList.Items {
+		GinkgoWriter.Printf("=============== Check the network information of the pod %v/%v ============== \n", pod.Namespace, pod.Name)
+		commands := []string{
+			"ip a",
+			"ip link show",
+			"ip n",
+			"ip -6 n",
+			"ip rule",
+			"ip -6 rule",
+			"ip route",
+			"ip route show table 100",
+			"ip route show table 101",
+			"ip -6 route",
+			"ip -6 route show table 100",
+			"ip -6 route show table 101",
+		}
+
+		for _, command := range commands {
+			GinkgoWriter.Printf("--------------- execute %v in pod: %v/%v on node: %v ------------ \n", command, pod.Namespace, pod.Name, pod.Spec.NodeName)
+			out, err := frame.ExecCommandInPod(pod.Name, pod.Namespace, command, ctx)
+			if err != nil {
+				jobResult = multierror.Append(jobResult, fmt.Errorf("pod %v/%v: command '%v' failed with error: %w, output: %s", pod.Namespace, pod.Name, command, err, out))
+			}
+		}
+	}
+
+	return jobResult.ErrorOrNil()
 }

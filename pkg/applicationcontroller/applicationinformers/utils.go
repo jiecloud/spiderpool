@@ -22,8 +22,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"k8s.io/utils/strings/slices"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -33,15 +34,15 @@ import (
 	"github.com/spidernet-io/spiderpool/pkg/types"
 )
 
-// ClusterSubnetDefaultFlexibleIPNumber is a singleton recording cluster default Subnet flexible IP number.
-var ClusterSubnetDefaultFlexibleIPNumber = new(int)
+// ClusterSubnetAutoPoolDefaultRedundantIPNumber is a singleton recording cluster subnet AutoPool default redundant IP number.
+var ClusterSubnetAutoPoolDefaultRedundantIPNumber = new(int)
 
 var errInvalidInput = func(str string) error {
 	return fmt.Errorf("invalid input '%s'", str)
 }
 
 const (
-	maxNameLength = 63
+	maxNameLength = k8svalidation.DNS1123SubdomainMaxLength
 	randomLength  = 5
 )
 
@@ -223,13 +224,13 @@ func GetSubnetAnnoConfig(podAnnotations map[string]string, log *zap.Logger) (*ty
 		}
 
 		if isFlexible {
-			subnetAnnoConfig.FlexibleIPNum = pointer.Int(ipNum)
+			subnetAnnoConfig.FlexibleIPNum = ptr.To(ipNum)
 		} else {
 			subnetAnnoConfig.AssignIPNum = ipNum
 		}
 	} else {
-		log.Sugar().Debugf("no specified IPPool IP number, default to use cluster default subnet flexible IP number: %d", *ClusterSubnetDefaultFlexibleIPNumber)
-		subnetAnnoConfig.FlexibleIPNum = pointer.Int(*ClusterSubnetDefaultFlexibleIPNumber)
+		log.Sugar().Debugf("no specified IPPool IP number, default to use cluster subnet AutoPool default redundant IP number: %d", *ClusterSubnetAutoPoolDefaultRedundantIPNumber)
+		subnetAnnoConfig.FlexibleIPNum = ptr.To(*ClusterSubnetAutoPoolDefaultRedundantIPNumber)
 	}
 
 	// annotation: "ipam.spidernet.io/reclaim-ippool", reclaim IPPool or not (default true)
@@ -517,4 +518,15 @@ func AutoPoolIPVersionLabelValue(ipVersion types.IPVersion) string {
 	}
 
 	return constant.LabelValueIPVersionV6
+}
+
+// HasSubnetsAnnotation checks the given annotation whether contains 'ipam.spidernet.io/subnets' or 'ipam.spidernet.io/subnet' key-value pair
+func HasSubnetsAnnotation(anno map[string]string) bool {
+	_, ok := anno[constant.AnnoSpiderSubnets]
+	if ok {
+		return true
+	}
+
+	_, ok = anno[constant.AnnoSpiderSubnet]
+	return ok
 }

@@ -5,6 +5,7 @@ package ippoolmanager_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"sync/atomic"
@@ -19,7 +20,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	"k8s.io/utils/pointer"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/ptr"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/spidernet-io/spiderpool/pkg/constant"
@@ -108,7 +111,7 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 		AfterEach(func() {
 			policy := metav1.DeletePropagationForeground
 			deleteOption = &client.DeleteOptions{
-				GracePeriodSeconds: pointer.Int64(0),
+				GracePeriodSeconds: ptr.To(int64(0)),
 				PropagationPolicy:  &policy,
 			}
 
@@ -262,7 +265,7 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 			})
 
 			It("allocate IP address from non-existent IPPool", func() {
-				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT)
+				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT, spiderpooltypes.PodTopController{})
 				Expect(apierrors.IsNotFound(err)).To(BeTrue())
 				Expect(res).To(BeNil())
 			})
@@ -273,7 +276,7 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 					Return(nil, constant.ErrUnknown).
 					Times(1)
 
-				ipPoolT.Spec.IPVersion = pointer.Int64(constant.IPv4)
+				ipPoolT.Spec.IPVersion = ptr.To(constant.IPv4)
 				ipPoolT.Spec.IPs = append(ipPoolT.Spec.IPs, "172.18.40.40")
 
 				err := fakeClient.Create(ctx, ipPoolT)
@@ -281,7 +284,7 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				err = tracker.Add(ipPoolT)
 				Expect(err).NotTo(HaveOccurred())
 
-				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT)
+				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT, spiderpooltypes.PodTopController{})
 				Expect(err).To(MatchError(constant.ErrUnknown))
 				Expect(res).To(BeNil())
 			})
@@ -292,10 +295,10 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 					Return(nil, nil).
 					Times(1)
 
-				patches := gomonkey.ApplyMethodReturn(fakeClient, "Update", constant.ErrUnknown)
+				patches := gomonkey.ApplyMethodReturn(fakeClient.Status(), "Update", constant.ErrUnknown)
 				defer patches.Reset()
 
-				ipPoolT.Spec.IPVersion = pointer.Int64(constant.IPv4)
+				ipPoolT.Spec.IPVersion = ptr.To(constant.IPv4)
 				ipPoolT.Spec.IPs = append(ipPoolT.Spec.IPs, "172.18.40.40")
 
 				err := fakeClient.Create(ctx, ipPoolT)
@@ -303,7 +306,7 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				err = tracker.Add(ipPoolT)
 				Expect(err).NotTo(HaveOccurred())
 
-				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT)
+				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT, spiderpooltypes.PodTopController{})
 				Expect(err).To(MatchError(constant.ErrUnknown))
 				Expect(res).To(BeNil())
 			})
@@ -314,10 +317,10 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 					Return(nil, nil).
 					Times(5)
 
-				patches := gomonkey.ApplyMethodReturn(fakeClient, "Update", apierrors.NewConflict(schema.GroupResource{Resource: "test"}, "other", nil))
+				patches := gomonkey.ApplyMethodReturn(fakeClient.Status(), "Update", apierrors.NewConflict(schema.GroupResource{Resource: "test"}, "other", nil))
 				defer patches.Reset()
 
-				ipPoolT.Spec.IPVersion = pointer.Int64(constant.IPv4)
+				ipPoolT.Spec.IPVersion = ptr.To(constant.IPv4)
 				ipPoolT.Spec.IPs = append(ipPoolT.Spec.IPs, "172.18.40.40")
 
 				err := fakeClient.Create(ctx, ipPoolT)
@@ -325,12 +328,88 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				err = tracker.Add(ipPoolT)
 				Expect(err).NotTo(HaveOccurred())
 
-				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT)
+				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT, spiderpooltypes.PodTopController{})
 				Expect(err).To(MatchError(constant.ErrRetriesExhausted))
 				Expect(res).To(BeNil())
 			})
 
-			It("allocate IP address", func() {
+			It("allocate IP address with normal pod", func() {
+				mockRIPManager.EXPECT().
+					AssembleReservedIPs(gomock.Eq(ctx), gomock.Eq(constant.IPv4)).
+					Return(nil, nil).
+					Times(1)
+
+				ipVersion := constant.IPv4
+				allocatedIP := "172.18.40.40/24"
+				gateway := "172.18.40.1"
+
+				ip, ipNet, err := net.ParseCIDR(allocatedIP)
+				Expect(err).NotTo(HaveOccurred())
+
+				ipPoolT.Spec.IPVersion = ptr.To(ipVersion)
+				ipPoolT.Spec.Subnet = ipNet.String()
+				ipPoolT.Spec.IPs = append(ipPoolT.Spec.IPs, ip.String())
+				ipPoolT.Spec.Gateway = ptr.To(gateway)
+
+				err = fakeClient.Create(ctx, ipPoolT)
+				Expect(err).NotTo(HaveOccurred())
+				err = tracker.Add(ipPoolT)
+				Expect(err).NotTo(HaveOccurred())
+
+				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT, spiderpooltypes.PodTopController{})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(*res.Nic).To(Equal(nic))
+				Expect(*res.Version).To(Equal(ipVersion))
+				Expect(*res.Address).To(Equal(allocatedIP))
+				Expect(res.IPPool).To(Equal(ipPoolT.Name))
+				Expect(res.Gateway).To(Equal(gateway))
+			})
+
+			It("allocate IP address with kubevirt vm pod", func() {
+				mockRIPManager.EXPECT().
+					AssembleReservedIPs(gomock.Eq(ctx), gomock.Eq(constant.IPv4)).
+					Return(nil, nil).
+					Times(1)
+
+				ipVersion := constant.IPv4
+				allocatedIP := "172.18.40.41/24"
+				gateway := "172.18.40.1"
+				vlan := int64(0)
+
+				ip, ipNet, err := net.ParseCIDR(allocatedIP)
+				Expect(err).NotTo(HaveOccurred())
+
+				ipPoolT.Spec.IPVersion = ptr.To(ipVersion)
+				ipPoolT.Spec.Subnet = ipNet.String()
+				ipPoolT.Spec.IPs = append(ipPoolT.Spec.IPs, ip.String())
+				ipPoolT.Spec.Gateway = ptr.To(gateway)
+
+				err = fakeClient.Create(ctx, ipPoolT)
+				Expect(err).NotTo(HaveOccurred())
+				err = tracker.Add(ipPoolT)
+				Expect(err).NotTo(HaveOccurred())
+
+				podTopController := spiderpooltypes.PodTopController{
+					AppNamespacedName: spiderpooltypes.AppNamespacedName{
+						APIVersion: kubevirtv1.SchemeGroupVersion.String(),
+						Kind:       constant.KindKubevirtVMI,
+						Namespace:  "default",
+						Name:       "vmi-demo",
+					},
+					UID: uuid.NewUUID(),
+					APP: nil,
+				}
+				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT, podTopController)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(*res.Nic).To(Equal(nic))
+				Expect(*res.Version).To(Equal(ipVersion))
+				Expect(*res.Address).To(Equal(allocatedIP))
+				Expect(res.IPPool).To(Equal(ipPoolT.Name))
+				Expect(res.Gateway).To(Equal(gateway))
+				Expect(res.Vlan).To(Equal(vlan))
+			})
+
+			It("allocate IP address from the previous records", func() {
 				mockRIPManager.EXPECT().
 					AssembleReservedIPs(gomock.Eq(ctx), gomock.Eq(constant.IPv4)).
 					Return(nil, nil).
@@ -344,18 +423,35 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				ip, ipNet, err := net.ParseCIDR(allocatedIP)
 				Expect(err).NotTo(HaveOccurred())
 
-				ipPoolT.Spec.IPVersion = pointer.Int64(ipVersion)
+				ipPoolT.Spec.IPVersion = ptr.To(ipVersion)
 				ipPoolT.Spec.Subnet = ipNet.String()
 				ipPoolT.Spec.IPs = append(ipPoolT.Spec.IPs, ip.String())
-				ipPoolT.Spec.Gateway = pointer.String(gateway)
-				ipPoolT.Spec.Vlan = pointer.Int64(vlan)
+				ipPoolT.Spec.Gateway = ptr.To(gateway)
+
+				key, err := cache.MetaNamespaceKeyFunc(podT)
+				Expect(err).NotTo(HaveOccurred())
+
+				records := spiderpoolv2beta1.PoolIPAllocations{
+					ip.String(): spiderpoolv2beta1.PoolIPAllocation{
+						NamespacedName: key,
+						PodUID:         string(podT.UID),
+					},
+				}
+				allocatedIPs, err := json.Marshal(records)
+				Expect(err).NotTo(HaveOccurred())
+
+				ipPoolT.Status = spiderpoolv2beta1.IPPoolStatus{
+					AllocatedIPs:     ptr.To(string(allocatedIPs)),
+					TotalIPCount:     ptr.To(int64(1)),
+					AllocatedIPCount: ptr.To(int64(1)),
+				}
 
 				err = fakeClient.Create(ctx, ipPoolT)
 				Expect(err).NotTo(HaveOccurred())
 				err = tracker.Add(ipPoolT)
 				Expect(err).NotTo(HaveOccurred())
 
-				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT)
+				res, err := ipPoolManager.AllocateIP(ctx, ipPoolName, nic, podT, spiderpooltypes.PodTopController{})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(*res.Nic).To(Equal(nic))
 				Expect(*res.Version).To(Equal(ipVersion))
@@ -376,7 +472,6 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				uid = string(uuid.NewUUID())
 				records = spiderpoolv2beta1.PoolIPAllocations{
 					ip: spiderpoolv2beta1.PoolIPAllocation{
-						NIC:            "eth0",
 						NamespacedName: "default/pod",
 						PodUID:         uid,
 					},
@@ -401,7 +496,7 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 			})
 
 			It("failed to update IPPool due to some unknown errors", func() {
-				patches := gomonkey.ApplyMethodReturn(fakeClient, "Update", constant.ErrUnknown)
+				patches := gomonkey.ApplyMethodReturn(fakeClient.Status(), "Update", constant.ErrUnknown)
 				defer patches.Reset()
 
 				data, err := convert.MarshalIPPoolAllocatedIPs(records)
@@ -418,7 +513,7 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 			})
 
 			It("runs out of retries to update IPPool, but conflicts still occur", func() {
-				patches := gomonkey.ApplyMethodReturn(fakeClient, "Update", apierrors.NewConflict(schema.GroupResource{Resource: "test"}, "other", nil))
+				patches := gomonkey.ApplyMethodReturn(fakeClient.Status(), "Update", apierrors.NewConflict(schema.GroupResource{Resource: "test"}, "other", nil))
 				defer patches.Reset()
 
 				data, err := convert.MarshalIPPoolAllocatedIPs(records)
@@ -467,7 +562,6 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				uid = string(uuid.NewUUID())
 				records = spiderpoolv2beta1.PoolIPAllocations{
 					ip: spiderpoolv2beta1.PoolIPAllocation{
-						NIC:            "eth0",
 						NamespacedName: "default/pod",
 						PodUID:         uid,
 					},
@@ -475,7 +569,7 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 			})
 
 			It("updates the allocated IP record from non-existent IPPool", func() {
-				err := ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, []spiderpooltypes.IPAndUID{})
+				err := ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, "default/pod", []spiderpooltypes.IPAndUID{})
 				Expect(apierrors.IsNotFound(err)).To(BeTrue())
 			})
 
@@ -487,12 +581,12 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				err = tracker.Add(ipPoolT)
 				Expect(err).NotTo(HaveOccurred())
 
-				err = ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, []spiderpooltypes.IPAndUID{{IP: ip, UID: uid}})
+				err = ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, "default/pod", []spiderpooltypes.IPAndUID{{IP: ip, UID: uid}})
 				Expect(err).NotTo(HaveOccurred())
 			})
 
 			It("failed to update IPPool due to some unknown errors", func() {
-				patches := gomonkey.ApplyMethodReturn(fakeClient, "Update", constant.ErrUnknown)
+				patches := gomonkey.ApplyMethodReturn(fakeClient.Status(), "Update", constant.ErrUnknown)
 				defer patches.Reset()
 
 				data, err := convert.MarshalIPPoolAllocatedIPs(records)
@@ -504,12 +598,12 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				err = tracker.Add(ipPoolT)
 				Expect(err).NotTo(HaveOccurred())
 
-				err = ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, []spiderpooltypes.IPAndUID{{IP: ip, UID: string(uuid.NewUUID())}})
+				err = ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, "default/pod", []spiderpooltypes.IPAndUID{{IP: ip, UID: string(uuid.NewUUID())}})
 				Expect(err).To(MatchError(constant.ErrUnknown))
 			})
 
 			It("runs out of retries to update IPPool, but conflicts still occur", func() {
-				patches := gomonkey.ApplyMethodReturn(fakeClient, "Update", apierrors.NewConflict(schema.GroupResource{Resource: "test"}, "other", nil))
+				patches := gomonkey.ApplyMethodReturn(fakeClient.Status(), "Update", apierrors.NewConflict(schema.GroupResource{Resource: "test"}, "other", nil))
 				defer patches.Reset()
 
 				data, err := convert.MarshalIPPoolAllocatedIPs(records)
@@ -521,8 +615,25 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				err = tracker.Add(ipPoolT)
 				Expect(err).NotTo(HaveOccurred())
 
-				err = ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, []spiderpooltypes.IPAndUID{{IP: ip, UID: string(uuid.NewUUID())}})
+				err = ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, "default/pod", []spiderpooltypes.IPAndUID{{IP: ip, UID: string(uuid.NewUUID())}})
 				Expect(err).To(MatchError(constant.ErrRetriesExhausted))
+			})
+
+			It("failed to update IPPool due to data broken", func() {
+				patches := gomonkey.ApplyMethodReturn(fakeClient.Status(), "Update", constant.ErrUnknown)
+				defer patches.Reset()
+
+				data, err := convert.MarshalIPPoolAllocatedIPs(records)
+				Expect(err).NotTo(HaveOccurred())
+
+				ipPoolT.Status.AllocatedIPs = data
+				err = fakeClient.Create(ctx, ipPoolT)
+				Expect(err).NotTo(HaveOccurred())
+				err = tracker.Add(ipPoolT)
+				Expect(err).NotTo(HaveOccurred())
+
+				err = ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, "default/abc", []spiderpooltypes.IPAndUID{{IP: ip, UID: string(uuid.NewUUID())}})
+				Expect(err).To(HaveOccurred())
 			})
 
 			It("updates the allocated IP record", func() {
@@ -536,7 +647,7 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				newUID := string(uuid.NewUUID())
-				err = ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, []spiderpooltypes.IPAndUID{{IP: ip, UID: newUID}})
+				err = ipPoolManager.UpdateAllocatedIPs(ctx, ipPoolName, "default/pod", []spiderpooltypes.IPAndUID{{IP: ip, UID: newUID}})
 				Expect(err).NotTo(HaveOccurred())
 
 				var ipPool spiderpoolv2beta1.SpiderIPPool
@@ -546,6 +657,62 @@ var _ = Describe("IPPoolManager", Label("ippool_manager_test"), func() {
 				newRecords, err := convert.UnmarshalIPPoolAllocatedIPs(ipPool.Status.AllocatedIPs)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(newRecords[ip].PodUID).To(Equal(newUID))
+			})
+		})
+
+		Describe("ParseWildcardPoolNameList", func() {
+			It("standard IPPool names", func() {
+				poolNamesArr := []string{"pool1", "pool2"}
+				newPoolNames, hasWildcard, err := ipPoolManager.ParseWildcardPoolNameList(ctx, poolNamesArr, constant.IPv4)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(hasWildcard).To(BeFalse())
+				Expect(newPoolNames).To(Equal(poolNamesArr))
+			})
+
+			It("wildcard IPPool name", func() {
+				ipPoolT.Spec.IPVersion = ptr.To(constant.IPv4)
+				err := fakeClient.Create(ctx, ipPoolT)
+				Expect(err).NotTo(HaveOccurred())
+
+				poolNamesArr := []string{"ippool*", "pp1"}
+				newPoolNames, hasWildcard, err := ipPoolManager.ParseWildcardPoolNameList(ctx, poolNamesArr, constant.IPv4)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(hasWildcard).To(BeTrue())
+				Expect(newPoolNames).To(HaveLen(2))
+				Expect(newPoolNames[0]).To(Equal(ipPoolName))
+			})
+
+			It("wildcard IPPool name with no matched", func() {
+				ipPoolT.Spec.IPVersion = ptr.To(constant.IPv4)
+				err := fakeClient.Create(ctx, ipPoolT)
+				Expect(err).NotTo(HaveOccurred())
+
+				// this wildcard would not match any IPPools' name
+				poolNamesArr := []string{"aaa*"}
+				newPoolNames, hasWildcard, err := ipPoolManager.ParseWildcardPoolNameList(ctx, poolNamesArr, constant.IPv4)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(hasWildcard).To(BeTrue())
+				Expect(newPoolNames).To(HaveLen(0))
+			})
+
+			It("invalid wildcard", func() {
+				ipPoolT.Spec.IPVersion = ptr.To(constant.IPv6)
+				err := fakeClient.Create(ctx, ipPoolT)
+				Expect(err).NotTo(HaveOccurred())
+
+				poolNamesArr := []string{"p1", "pool*", "[ippool]["}
+				_, _, err = ipPoolManager.ParseWildcardPoolNameList(ctx, poolNamesArr, constant.IPv6)
+				Expect(err).To(HaveOccurred())
+			})
+
+			It("failed to call ListIPPools with wildcard usage", func() {
+				patches := gomonkey.ApplyMethodReturn(fakeClient, "List", constant.ErrUnknown)
+				defer patches.Reset()
+
+				poolNamesArr := []string{"ippool*", "pp1"}
+				_, _, err := ipPoolManager.ParseWildcardPoolNameList(ctx, poolNamesArr, constant.IPv4)
+				Expect(err).To(HaveOccurred())
+				Expect(err).To(MatchError(constant.ErrUnknown))
 			})
 		})
 	})

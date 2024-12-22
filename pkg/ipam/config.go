@@ -15,18 +15,21 @@ import (
 )
 
 type IPAMConfig struct {
-	EnableIPv4               bool
-	EnableIPv6               bool
-	ClusterDefaultIPv4IPPool []string
-	ClusterDefaultIPv6IPPool []string
+	EnableIPv4 bool
+	EnableIPv6 bool
 
-	EnableSpiderSubnet bool
-	EnableStatefulSet  bool
+	EnableSpiderSubnet                   bool
+	EnableAutoPoolForApplication         bool
+	EnableSpiderSubnetAutoPool           bool
+	EnableStatefulSet                    bool
+	EnableKubevirtStaticIP               bool
+	EnableReleaseConflictIPsForStateless bool
 
 	OperationRetries     int
 	OperationGapDuration time.Duration
 
 	MultusClusterNetwork *string
+	AgentNamespace       string
 }
 
 func setDefaultsForIPAMConfig(config IPAMConfig) IPAMConfig {

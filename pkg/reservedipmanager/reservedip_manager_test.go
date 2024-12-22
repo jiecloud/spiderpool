@@ -15,7 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/spidernet-io/spiderpool/pkg/constant"
@@ -65,7 +65,6 @@ var _ = Describe("ReservedIPManager", Label("reservedip_manager_test"), func() {
 				Spec: spiderpoolv2beta1.ReservedIPSpec{},
 			}
 
-			now := metav1.Now()
 			terminatingV4RIPT = &spiderpoolv2beta1.SpiderReservedIP{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       constant.KindSpiderReservedIP,
@@ -73,11 +72,11 @@ var _ = Describe("ReservedIPManager", Label("reservedip_manager_test"), func() {
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:                       "terminating-ipv4-reservedip",
-					DeletionTimestamp:          &now,
-					DeletionGracePeriodSeconds: pointer.Int64(30),
+					DeletionGracePeriodSeconds: ptr.To(int64(30)),
+					Finalizers:                 []string{constant.SpiderFinalizer},
 				},
 				Spec: spiderpoolv2beta1.ReservedIPSpec{
-					IPVersion: pointer.Int64(constant.IPv4),
+					IPVersion: ptr.To(constant.IPv4),
 					IPs: []string{
 						"172.18.40.40",
 					},
@@ -90,7 +89,7 @@ var _ = Describe("ReservedIPManager", Label("reservedip_manager_test"), func() {
 		AfterEach(func() {
 			policy := metav1.DeletePropagationForeground
 			deleteOption = &client.DeleteOptions{
-				GracePeriodSeconds: pointer.Int64(0),
+				GracePeriodSeconds: ptr.To(int64(0)),
 				PropagationPolicy:  &policy,
 			}
 
@@ -254,7 +253,7 @@ var _ = Describe("ReservedIPManager", Label("reservedip_manager_test"), func() {
 			})
 
 			It("does not assemble terminating IPv4 reserved-IP addresses", func() {
-				rIPT.Spec.IPVersion = pointer.Int64(constant.IPv4)
+				rIPT.Spec.IPVersion = ptr.To(constant.IPv4)
 				rIPT.Spec.IPs = []string{
 					"172.18.40.1-172.18.40.2",
 					"172.18.40.10",
@@ -264,6 +263,10 @@ var _ = Describe("ReservedIPManager", Label("reservedip_manager_test"), func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				err = fakeClient.Create(ctx, terminatingV4RIPT)
+				Expect(err).NotTo(HaveOccurred())
+
+				// set it to terminating
+				err = fakeClient.Delete(ctx, terminatingV4RIPT)
 				Expect(err).NotTo(HaveOccurred())
 
 				ips, err := rIPManager.AssembleReservedIPs(ctx, constant.IPv4)
@@ -278,7 +281,7 @@ var _ = Describe("ReservedIPManager", Label("reservedip_manager_test"), func() {
 			})
 
 			It("exists invalid ReservedIPs in the cluster", func() {
-				rIPT.Spec.IPVersion = pointer.Int64(constant.IPv4)
+				rIPT.Spec.IPVersion = ptr.To(constant.IPv4)
 				rIPT.Spec.IPs = append(rIPT.Spec.IPs, constant.InvalidIPRange)
 
 				err := fakeClient.Create(ctx, rIPT)

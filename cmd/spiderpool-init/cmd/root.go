@@ -5,11 +5,10 @@ package cmd
 
 import (
 	"context"
-	"time"
 
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	"github.com/spidernet-io/spiderpool/pkg/constant"
 	spiderpoolv2beta1 "github.com/spidernet-io/spiderpool/pkg/k8s/apis/spiderpool.spidernet.io/v2beta1"
@@ -27,7 +26,7 @@ func Execute() {
 		logger.Fatal(err.Error())
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err := client.WaitForEndpointReady(ctx, config.Namespace, config.ControllerName); err != nil {
@@ -42,13 +41,15 @@ func Execute() {
 				Name: config.CoordinatorName,
 			},
 			Spec: spiderpoolv2beta1.CoordinatorSpec{
-				TuneMode:           &config.CoordinatorTuneMode,
-				PodCIDRType:        config.CoordinatorPodCIDRType,
+				Mode:               &config.CoordinatorMode,
+				PodCIDRType:        &config.CoordinatorPodCIDRType,
 				TunePodRoutes:      &config.CoordinatorTunePodRoutes,
 				DetectIPConflict:   &config.CoordinatorDetectIPConflict,
 				DetectGateway:      &config.CoordinatorDetectGateway,
 				PodDefaultRouteNIC: &config.CoordinatorPodDefaultRouteNic,
 				PodMACPrefix:       &config.CoordinatorPodMACPrefix,
+				VethLinkAddress:    &config.CoordinatorVethLinkAddress,
+				HijackCIDR:         config.CoordinatorHijackCIDR,
 			},
 		}
 		if err := client.WaitForCoordinatorCreated(ctx, coord); err != nil {
@@ -64,13 +65,13 @@ func Execute() {
 				Name: config.V4SubnetName,
 			},
 			Spec: spiderpoolv2beta1.SubnetSpec{
-				IPVersion: pointer.Int64(constant.IPv4),
+				IPVersion: ptr.To(constant.IPv4),
 				Subnet:    config.V4CIDR,
 				IPs:       config.V4IPRanges,
 			},
 		}
 		if len(config.V4Gateway) != 0 {
-			subnet.Spec.Gateway = pointer.String(config.V4Gateway)
+			subnet.Spec.Gateway = ptr.To(config.V4Gateway)
 		}
 
 		if err := client.WaitForSubnetCreated(ctx, subnet); err != nil {
@@ -86,13 +87,13 @@ func Execute() {
 				Name: config.V6SubnetName,
 			},
 			Spec: spiderpoolv2beta1.SubnetSpec{
-				IPVersion: pointer.Int64(constant.IPv6),
+				IPVersion: ptr.To(constant.IPv6),
 				Subnet:    config.V6CIDR,
 				IPs:       config.V6IPRanges,
 			},
 		}
 		if len(config.V6Gateway) != 0 {
-			subnet.Spec.Gateway = pointer.String(config.V6Gateway)
+			subnet.Spec.Gateway = ptr.To(config.V6Gateway)
 		}
 
 		if err := client.WaitForSubnetCreated(ctx, subnet); err != nil {
@@ -108,14 +109,14 @@ func Execute() {
 				Name: config.V4IPPoolName,
 			},
 			Spec: spiderpoolv2beta1.IPPoolSpec{
-				IPVersion: pointer.Int64(constant.IPv4),
+				IPVersion: ptr.To(constant.IPv4),
 				Subnet:    config.V4CIDR,
 				IPs:       config.V4IPRanges,
-				Default:   pointer.Bool(true),
+				Default:   ptr.To(true),
 			},
 		}
 		if len(config.V4Gateway) != 0 {
-			ipPool.Spec.Gateway = pointer.String(config.V4Gateway)
+			ipPool.Spec.Gateway = ptr.To(config.V4Gateway)
 		}
 
 		if err := client.WaitForIPPoolCreated(ctx, ipPool); err != nil {
@@ -131,14 +132,14 @@ func Execute() {
 				Name: config.V6IPPoolName,
 			},
 			Spec: spiderpoolv2beta1.IPPoolSpec{
-				IPVersion: pointer.Int64(constant.IPv6),
+				IPVersion: ptr.To(constant.IPv6),
 				Subnet:    config.V6CIDR,
 				IPs:       config.V6IPRanges,
-				Default:   pointer.Bool(true),
+				Default:   ptr.To(true),
 			},
 		}
 		if len(config.V6Gateway) != 0 {
-			ipPool.Spec.Gateway = pointer.String(config.V6Gateway)
+			ipPool.Spec.Gateway = ptr.To(config.V6Gateway)
 		}
 
 		if err := client.WaitForIPPoolCreated(ctx, ipPool); err != nil {
@@ -146,8 +147,15 @@ func Execute() {
 		}
 	}
 
-	logger.Info("Finish init")
+	if config.enableMultusConfig {
+		if err = InitMultusDefaultCR(ctx, &config, client); err != nil {
+			logger.Fatal(err.Error())
+		}
+	}
 
-	// Wait for helm --wait.
-	time.Sleep(300 * time.Second)
+	if err = makeReadinessReady(&config); err != nil {
+		logger.Fatal(err.Error())
+	}
+
+	logger.Info("Finish init")
 }

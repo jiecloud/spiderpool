@@ -14,17 +14,21 @@ import (
 
 	"github.com/spidernet-io/spiderpool/pkg/election"
 	"github.com/spidernet-io/spiderpool/pkg/ippoolmanager"
+	"github.com/spidernet-io/spiderpool/pkg/kubevirtmanager"
 	"github.com/spidernet-io/spiderpool/pkg/limiter"
 	"github.com/spidernet-io/spiderpool/pkg/logutils"
+	"github.com/spidernet-io/spiderpool/pkg/nodemanager"
 	"github.com/spidernet-io/spiderpool/pkg/podmanager"
 	"github.com/spidernet-io/spiderpool/pkg/statefulsetmanager"
 	"github.com/spidernet-io/spiderpool/pkg/workloadendpointmanager"
 )
 
 type GarbageCollectionConfig struct {
-	EnableGCIP                bool
-	EnableGCForTerminatingPod bool
-	EnableStatefulSet         bool
+	EnableGCIP                                    bool
+	EnableGCStatelessTerminatingPodOnReadyNode    bool
+	EnableGCStatelessTerminatingPodOnNotReadyNode bool
+	EnableStatefulSet                             bool
+	EnableKubevirtStaticIP                        bool
 
 	ReleaseIPWorkerNum     int
 	GCIPChannelBuffer      int
@@ -62,11 +66,13 @@ type SpiderGC struct {
 	gcSignal         chan struct{}
 	gcIPPoolIPSignal chan *PodEntry
 
-	wepMgr    workloadendpointmanager.WorkloadEndpointManager
-	ippoolMgr ippoolmanager.IPPoolManager
-	podMgr    podmanager.PodManager
-	stsMgr    statefulsetmanager.StatefulSetManager
-	leader    election.SpiderLeaseElector
+	wepMgr      workloadendpointmanager.WorkloadEndpointManager
+	ippoolMgr   ippoolmanager.IPPoolManager
+	podMgr      podmanager.PodManager
+	stsMgr      statefulsetmanager.StatefulSetManager
+	kubevirtMgr kubevirtmanager.KubevirtManager
+	nodeMgr     nodemanager.NodeManager
+	leader      election.SpiderLeaseElector
 
 	informerFactory informers.SharedInformerFactory
 	gcLimiter       limiter.Limiter
@@ -77,6 +83,8 @@ func NewGCManager(clientSet *kubernetes.Clientset, config *GarbageCollectionConf
 	ippoolManager ippoolmanager.IPPoolManager,
 	podManager podmanager.PodManager,
 	stsManager statefulsetmanager.StatefulSetManager,
+	kubevirtMgr kubevirtmanager.KubevirtManager,
+	nodeMgr nodemanager.NodeManager,
 	spiderControllerLeader election.SpiderLeaseElector) (GCManager, error) {
 	if clientSet == nil {
 		return nil, fmt.Errorf("k8s ClientSet must be specified")
@@ -112,10 +120,12 @@ func NewGCManager(clientSet *kubernetes.Clientset, config *GarbageCollectionConf
 		gcSignal:         make(chan struct{}, 1),
 		gcIPPoolIPSignal: make(chan *PodEntry, config.GCIPChannelBuffer),
 
-		wepMgr:    wepManager,
-		ippoolMgr: ippoolManager,
-		podMgr:    podManager,
-		stsMgr:    stsManager,
+		wepMgr:      wepManager,
+		ippoolMgr:   ippoolManager,
+		podMgr:      podManager,
+		stsMgr:      stsManager,
+		kubevirtMgr: kubevirtMgr,
+		nodeMgr:     nodeMgr,
 
 		leader:    spiderControllerLeader,
 		gcLimiter: limiter.NewLimiter(limiter.LimiterConfig{}),
@@ -156,7 +166,6 @@ func (s *SpiderGC) Start(ctx context.Context) <-chan error {
 	return errCh
 }
 
-// TODO(Icarus9913): implement me
 func (s *SpiderGC) GetPodDatabase() PodDBer {
 	return s.PodDB
 }

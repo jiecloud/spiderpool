@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -14,6 +15,7 @@ import (
 	apitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/spidernet-io/spiderpool/api/v1/agent/models"
@@ -31,9 +33,10 @@ import (
 type IPPoolManager interface {
 	GetIPPoolByName(ctx context.Context, poolName string, cached bool) (*spiderpoolv2beta1.SpiderIPPool, error)
 	ListIPPools(ctx context.Context, cached bool, opts ...client.ListOption) (*spiderpoolv2beta1.SpiderIPPoolList, error)
-	AllocateIP(ctx context.Context, poolName, nic string, pod *corev1.Pod) (*models.IPConfig, error)
+	AllocateIP(ctx context.Context, poolName, nic string, pod *corev1.Pod, podController types.PodTopController) (*models.IPConfig, error)
 	ReleaseIP(ctx context.Context, poolName string, ipAndUIDs []types.IPAndUID) error
-	UpdateAllocatedIPs(ctx context.Context, poolName string, ipAndCIDs []types.IPAndUID) error
+	UpdateAllocatedIPs(ctx context.Context, poolName, namespacedName string, ipAndCIDs []types.IPAndUID) error
+	ParseWildcardPoolNameList(ctx context.Context, PoolNames []string, ipVersion types.IPVersion) (newPoolNames []string, hasWildcard bool, err error)
 }
 
 type ipPoolManager struct {
@@ -90,7 +93,7 @@ func (im *ipPoolManager) ListIPPools(ctx context.Context, cached bool, opts ...c
 	return &ipPoolList, nil
 }
 
-func (im *ipPoolManager) AllocateIP(ctx context.Context, poolName, nic string, pod *corev1.Pod) (*models.IPConfig, error) {
+func (im *ipPoolManager) AllocateIP(ctx context.Context, poolName, nic string, pod *corev1.Pod, podController types.PodTopController) (*models.IPConfig, error) {
 	logger := logutils.FromContext(ctx)
 
 	backoff := retry.DefaultRetry
@@ -108,7 +111,7 @@ func (im *ipPoolManager) AllocateIP(ctx context.Context, poolName, nic string, p
 		}
 
 		logger.Debug("Generate a random IP address")
-		allocatedIP, err := im.genRandomIP(ctx, nic, ipPool, pod)
+		allocatedIP, err := im.genRandomIP(ctx, ipPool, pod, podController)
 		if err != nil {
 			return err
 		}
@@ -128,16 +131,31 @@ func (im *ipPoolManager) AllocateIP(ctx context.Context, poolName, nic string, p
 		return nil
 	})
 	if err != nil {
-		if err == wait.ErrWaitTimeout {
+		if wait.Interrupted(err) {
 			err = fmt.Errorf("%w (%d times), failed to allocate IP from IPPool %s", constant.ErrRetriesExhausted, steps, poolName)
 		}
+
 		return nil, err
 	}
 
 	return ipConfig, nil
 }
 
-func (im *ipPoolManager) genRandomIP(ctx context.Context, nic string, ipPool *spiderpoolv2beta1.SpiderIPPool, pod *corev1.Pod) (net.IP, error) {
+func (im *ipPoolManager) genRandomIP(ctx context.Context, ipPool *spiderpoolv2beta1.SpiderIPPool, pod *corev1.Pod, podController types.PodTopController) (net.IP, error) {
+	logger := logutils.FromContext(ctx)
+
+	var tmpPod *corev1.Pod
+	if im.config.EnableKubevirtStaticIP && podController.APIVersion == kubevirtv1.SchemeGroupVersion.String() && podController.Kind == constant.KindKubevirtVMI {
+		tmpPod = pod.DeepCopy()
+		tmpPod.SetName(podController.Name)
+	} else {
+		tmpPod = pod
+	}
+	key, err := cache.MetaNamespaceKeyFunc(tmpPod)
+	if err != nil {
+		return nil, err
+	}
+
 	reservedIPs, err := im.rIPManager.AssembleReservedIPs(ctx, *ipPool.Spec.IPVersion)
 	if err != nil {
 		return nil, err
@@ -149,35 +167,49 @@ func (im *ipPoolManager) genRandomIP(ctx context.Context, nic string, ipPool *sp
 	}
 
 	var used []string
-	for ip := range allocatedRecords {
+	for ip, record := range allocatedRecords {
+		// In a multi-NIC scenario, if one of the NIC pools does not have enough IPs, an allocation failure message will be displayed.
+		// However, other IP pools still have IPs, which will cause IPs in other pools to be exhausted.
+		// Check if there is a duplicate Pod UID in IPPool.allocatedRecords.
+		// If so, we skip this allocation and assume that this Pod has already obtained an IP address in the pool.
+		if record.PodUID == string(pod.UID) {
+			logger.Sugar().Infof("The Pod %s/%s UID %s already exists in the assigned IP %s", pod.Namespace, pod.Name, ip, string(pod.UID))
+			return net.ParseIP(ip), nil
+		}
 		used = append(used, ip)
 	}
+
 	usedIPs, err := spiderpoolip.ParseIPRanges(*ipPool.Spec.IPVersion, used)
 	if err != nil {
 		return nil, err
 	}
 
-	totalIPs, err := spiderpoolip.AssembleTotalIPs(*ipPool.Spec.IPVersion, ipPool.Spec.IPs, ipPool.Spec.ExcludeIPs)
+	unAvailableIPs, err := spiderpoolip.ParseIPRanges(*ipPool.Spec.IPVersion, ipPool.Spec.ExcludeIPs)
 	if err != nil {
 		return nil, err
 	}
 
-	availableIPs := spiderpoolip.IPsDiffSet(totalIPs, append(reservedIPs, usedIPs...), false)
+	availableIPs := spiderpoolip.FindAvailableIPs(ipPool.Spec.IPs, append(unAvailableIPs, append(reservedIPs, usedIPs...)...), 1)
 	if len(availableIPs) == 0 {
-		return nil, constant.ErrIPUsedOut
+		// traverse the usedIPs to find the previous allocated IPs if there be
+		// reference issue: https://github.com/spidernet-io/spiderpool/issues/2517
+		allocatedIPFromRecords, hasFound := findAllocatedIPFromRecords(allocatedRecords, key, string(pod.UID))
+		if !hasFound {
+			return nil, constant.ErrIPUsedOut
+		}
+
+		availableIPs, err = spiderpoolip.ParseIPRange(*ipPool.Spec.IPVersion, allocatedIPFromRecords)
+		if nil != err {
+			return nil, err
+		}
+		logger.Sugar().Warnf("find previous IP '%s' from IPPool '%s' recorded IP allocations", allocatedIPFromRecords, ipPool.Name)
 	}
 	resIP := availableIPs[0]
-
-	key, err := cache.MetaNamespaceKeyFunc(pod)
-	if err != nil {
-		return nil, err
-	}
 
 	if allocatedRecords == nil {
 		allocatedRecords = spiderpoolv2beta1.PoolIPAllocations{}
 	}
 	allocatedRecords[resIP.String()] = spiderpoolv2beta1.PoolIPAllocation{
-		NIC:            nic,
 		NamespacedName: key,
 		PodUID:         string(pod.UID),
 	}
@@ -192,7 +224,15 @@ func (im *ipPoolManager) genRandomIP(ctx context.Context, nic string, ipPool *sp
 		ipPool.Status.AllocatedIPCount = new(int64)
 	}
 
-	*ipPool.Status.AllocatedIPCount++
+	// reference issue: https://github.com/spidernet-io/spiderpool/issues/3771
+	if int64(len(usedIPs)) != *ipPool.Status.AllocatedIPCount {
+		logger.Sugar().Errorf("Handling AllocatedIPCount while allocating IP from IPPool %s, but there is a data discrepancy. Expected %d, but got %d.", ipPool.Name, len(usedIPs), *ipPool.Status.AllocatedIPCount)
+	}
+
+	// Adding a newly assigned IP
+	usedIPs = append(usedIPs, resIP)
+	*ipPool.Status.AllocatedIPCount = int64(len(usedIPs))
+
 	if *ipPool.Status.AllocatedIPCount > int64(*im.config.MaxAllocatedIPs) {
 		return nil, fmt.Errorf("%w, threshold of IP records(<=%d) for IPPool %s exceeded", constant.ErrIPUsedOut, im.config.MaxAllocatedIPs, ipPool.Name)
 	}
@@ -225,12 +265,17 @@ func (im *ipPoolManager) ReleaseIP(ctx context.Context, poolName string, ipAndUI
 			ipPool.Status.AllocatedIPCount = new(int64)
 		}
 
+		// reference issue: https://github.com/spidernet-io/spiderpool/issues/3771
+		if int64(len(allocatedRecords)) != *ipPool.Status.AllocatedIPCount {
+			logger.Sugar().Errorf("Handling AllocatedIPCount while releasing IP from IPPool %s, but there is a data discrepancy. Expected %d, but got %d.", ipPool.Name, len(allocatedRecords), *ipPool.Status.AllocatedIPCount)
+		}
+
 		release := false
 		for _, iu := range ipAndUIDs {
 			if record, ok := allocatedRecords[iu.IP]; ok {
 				if record.PodUID == iu.UID {
 					delete(allocatedRecords, iu.IP)
-					*ipPool.Status.AllocatedIPCount--
+					*ipPool.Status.AllocatedIPCount = int64(len(allocatedRecords))
 					release = true
 				}
 			}
@@ -260,7 +305,7 @@ func (im *ipPoolManager) ReleaseIP(ctx context.Context, poolName string, ipAndUI
 		return nil
 	})
 	if err != nil {
-		if err == wait.ErrWaitTimeout {
+		if wait.Interrupted(err) {
 			err = fmt.Errorf("%w (%d times), failed to release IP addresses %+v from IPPool %s", constant.ErrRetriesExhausted, steps, ipAndUIDs, poolName)
 		}
 		return err
@@ -269,7 +314,7 @@ func (im *ipPoolManager) ReleaseIP(ctx context.Context, poolName string, ipAndUI
 	return nil
 }
 
-func (im *ipPoolManager) UpdateAllocatedIPs(ctx context.Context, poolName string, ipAndUIDs []types.IPAndUID) error {
+func (im *ipPoolManager) UpdateAllocatedIPs(ctx context.Context, poolName, namespacedName string, ipAndUIDs []types.IPAndUID) error {
 	logger := logutils.FromContext(ctx)
 
 	backoff := retry.DefaultRetry
@@ -293,6 +338,10 @@ func (im *ipPoolManager) UpdateAllocatedIPs(ctx context.Context, poolName string
 		recreate := false
 		for _, iu := range ipAndUIDs {
 			if record, ok := allocatedRecords[iu.IP]; ok {
+				if record.NamespacedName != namespacedName {
+					return fmt.Errorf("failed to update allocated IP because of data broken: IPPool %s IP %s allocation detail %v mistach namespacedName %s",
+						poolName, iu.IP, record, namespacedName)
+				}
 				if record.PodUID != iu.UID {
 					record.PodUID = iu.UID
 					allocatedRecords[iu.IP] = record
@@ -323,11 +372,50 @@ func (im *ipPoolManager) UpdateAllocatedIPs(ctx context.Context, poolName string
 		return nil
 	})
 	if err != nil {
-		if err == wait.ErrWaitTimeout {
+		if wait.Interrupted(err) {
 			err = fmt.Errorf("%w (%d times), failed to re-allocate the IP addresses %+v from IPPool %s", constant.ErrRetriesExhausted, steps, ipAndUIDs, poolName)
 		}
 		return err
 	}
 
 	return nil
+}
+
+func (im *ipPoolManager) ParseWildcardPoolNameList(ctx context.Context, poolNamesArr []string, ipVersion types.IPVersion) (newPoolNames []string, hasWildcard bool, err error) {
+	if HasWildcardInSlice(poolNamesArr) {
+		var ipVersionStr string
+		if ipVersion == constant.IPv4 {
+			ipVersionStr = constant.Str4
+		} else {
+			ipVersionStr = constant.Str6
+		}
+
+		poolList, err := im.ListIPPools(ctx, constant.UseCache, client.MatchingFields{constant.SpecIPVersionField: ipVersionStr})
+		if nil != err {
+			return nil, false, err
+		}
+
+		newPoolNamesArr := []string{}
+		for _, tmpStr := range poolNamesArr {
+			if HasWildcardInStr(tmpStr) {
+				for _, tmpPool := range poolList.Items {
+					isMatch, err := filepath.Match(tmpStr, tmpPool.Name)
+					if nil != err {
+						return nil, false, fmt.Errorf("failed to match wildcard: IPv%d PoolName pattern '%s', character '%s', error: %v", ipVersion, tmpStr, tmpPool.Name, err)
+					}
+					// wildcard matches
+					if isMatch {
+						newPoolNamesArr = append(newPoolNamesArr, tmpPool.Name)
+					}
+				}
+			} else {
+				// original IPPool name
+				newPoolNamesArr = append(newPoolNamesArr, tmpStr)
+			}
+		}
+
+		return newPoolNamesArr, true, nil
+	}
+
+	return poolNamesArr, false, nil
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	otelapi "go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -17,7 +18,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -49,6 +50,7 @@ type IPPoolController struct {
 type IPPoolControllerConfig struct {
 	IPPoolControllerWorkers       int
 	EnableSpiderSubnet            bool
+	EnableAutoPoolForApplication  bool
 	MaxWorkqueueLength            int
 	WorkQueueMaxRetries           int
 	LeaderRetryElectGap           time.Duration
@@ -266,7 +268,7 @@ func (ic *IPPoolController) processNextWorkItem() bool {
 
 func (ic *IPPoolController) handleIPPool(ctx context.Context, pool *spiderpoolv2beta1.SpiderIPPool) (err error) {
 	// checkout the Auto-created IPPools whether need to scale or clean up legacies
-	if ic.EnableSpiderSubnet && IsAutoCreatedIPPool(pool) {
+	if ic.EnableSpiderSubnet && ic.EnableAutoPoolForApplication && IsAutoCreatedIPPool(pool) {
 		err := ic.cleanAutoIPPoolLegacy(ctx, pool)
 		if nil != err {
 			return err
@@ -282,11 +284,11 @@ func (ic *IPPoolController) handleIPPool(ctx context.Context, pool *spiderpoolv2
 	// metrics
 	if pool.Status.TotalIPCount != nil {
 		attr := attribute.String(constant.KindSpiderIPPool, pool.Name)
-		metric.IPPoolTotalIPCounts.Add(ctx, *pool.Status.TotalIPCount, attr)
+		metric.IPPoolTotalIPCounts.Add(ctx, *pool.Status.TotalIPCount, otelapi.WithAttributes(attr))
 		if pool.Status.AllocatedIPCount != nil {
-			metric.IPPoolAvailableIPCounts.Add(ctx, (*pool.Status.TotalIPCount)-(*pool.Status.AllocatedIPCount), attr)
+			metric.IPPoolAvailableIPCounts.Add(ctx, (*pool.Status.TotalIPCount)-(*pool.Status.AllocatedIPCount), otelapi.WithAttributes(attr))
 		} else {
-			metric.IPPoolAvailableIPCounts.Add(ctx, *pool.Status.TotalIPCount, attr)
+			metric.IPPoolAvailableIPCounts.Add(ctx, *pool.Status.TotalIPCount, otelapi.WithAttributes(attr))
 		}
 	}
 
@@ -311,18 +313,18 @@ func (ic *IPPoolController) syncHandler(ctx context.Context, pool *spiderpoolv2b
 	// initial the original data
 	if pool.Status.AllocatedIPCount == nil {
 		needUpdate = true
-		pool.Status.AllocatedIPCount = pointer.Int64(0)
+		pool.Status.AllocatedIPCount = ptr.To(int64(0))
 		informerLogger.Sugar().Infof("initial SpiderIPPool '%s' status AllocatedIPCount to 0", pool.Name)
 	}
 
-	totalIPs, err := spiderpoolip.AssembleTotalIPs(*pool.Spec.IPVersion, pool.Spec.IPs, pool.Spec.ExcludeIPs)
-	if nil != err {
+	subnet, err := spiderpoolip.NewCIDR(pool.Spec.Subnet, pool.Spec.IPs, pool.Spec.ExcludeIPs)
+	if err != nil {
 		return fmt.Errorf("%w: failed to calculate SpiderIPPool '%s' total IP count, error: %v", constant.ErrWrongInput, pool.Name, err)
 	}
-
-	if pool.Status.TotalIPCount == nil || *pool.Status.TotalIPCount != int64(len(totalIPs)) {
+	total := subnet.TotalIPInt()
+	if pool.Status.TotalIPCount == nil || *pool.Status.TotalIPCount != int64(total) {
 		needUpdate = true
-		pool.Status.TotalIPCount = pointer.Int64(int64(len(totalIPs)))
+		pool.Status.TotalIPCount = ptr.To(int64(total))
 	}
 
 	if needUpdate {

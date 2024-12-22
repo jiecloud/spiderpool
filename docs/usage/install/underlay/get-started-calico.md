@@ -12,11 +12,12 @@ Spiderpool is able to provide static IPs to Deployments, StatefulSets, and other
 
 ## Prerequisites
 
+* [System requirements](./../system-requirements.md)
 * An available **_Kubernetes_** cluster with a recommended version higher than 1.22, where **_Calico_** is installed as the default CNI.
 
     Make sure that Calico is not configured to use IPIP or VXLAN tunneling as we'll demonstrate how to use Calico for underlay networks.
 
-    Confirm that Calico has enabled BGP configuration in full-mesh mode。
+    Confirm that Calico has enabled BGP configuration in full-mesh mode.
 
 * Helm and Calicoctl
 
@@ -24,21 +25,22 @@ Spiderpool is able to provide static IPs to Deployments, StatefulSets, and other
 
 ```shell
 helm repo add spiderpool https://spidernet-io.github.io/spiderpool
-helm install spiderpool spiderpool/spiderpool --namespace kube-system 
+helm repo update spiderpool
+helm install spiderpool spiderpool/spiderpool --namespace kube-system --set multus.multusCNI.install=false
 ```
 
-> Spiderpool is IPv4-Only by default. If you want to enable IPv6, refer to [Spiderpool IPv6](https://github.com/spidernet-io/spiderpool/blob/main/docs/usage/ipv6.md).
+> If you are a mainland user who is not available to access ghcr.io, you can specify the parameter `-set global.imageRegistryOverride=ghcr.m.daocloud.io` to avoid image pulling failures for Spiderpool.
 >
-> If you are mainland user who is not available to access ghcr.io，You can specify the parameter `-set global.imageRegistryOverride=ghcr.m.daocloud.io` to avoid image pulling failures for Spiderpool.
+> Specify the name of the NetworkAttachmentDefinition instance for the default CNI used by Multus via `multus.multusCNI.defaultCniCRName`. If the `multus.multusCNI.defaultCniCRName` option is provided, an empty NetworkAttachmentDefinition instance will be automatically generated upon installation. Otherwise, Multus will attempt to create a NetworkAttachmentDefinition instance based on the first CNI configuration found in the /etc/cni/net.d directory. If no suitable configuration is found, a NetworkAttachmentDefinition instance named `default` will be created to complete the installation of Multus.
 
-Create a subnet for a Pod (SpiderSubnet):
+Create the SpiderIPPool instance used by the Pod:
 
 ```shell
 cat << EOF | kubectl apply -f -
 apiVersion: spiderpool.spidernet.io/v2beta1
-kind: SpiderSubnet
+kind: SpiderIPPool
 metadata:
-  name: nginx-subnet-v4
+  name: nginx-ippool-v4
   labels:  
     ipam.spidernet.io/subnet-cidr: 10-244-0-0-16
 spec:
@@ -51,25 +53,25 @@ EOF
 Verify the installation：
 
 ```shell
-[root@master ~]# kubectl get po -n kube-system  | grep spiderpool
-spiderpool-agent-27fr2                     1/1     Running     0          2m
-spiderpool-agent-8vwxj                     1/1     Running     0          2m
-spiderpool-controller-bc8d67b5f-xwsql      1/1     Running     0          2m
-
-[root@master ~]# kubectl get ss
+[root@master ~]# kubectl get po -n kube-system |grep spiderpool
+spiderpool-agent-7hhkz                   1/1     Running     0              13m
+spiderpool-agent-kxf27                   1/1     Running     0              13m
+spiderpool-controller-76798dbb68-xnktr   1/1     Running     0              13m
+spiderpool-init                          0/1     Completed   0              13m
+[root@master ~]# kubectl get sp
 NAME              VERSION   SUBNET          ALLOCATED-IP-COUNT   TOTAL-IP-COUNT
-nginx-subnet-v4   4         10.244.0.0/16   0                    25602
+nginx-ippool-v4   4         10.244.0.0/16   0                    25602
 ```
 
 ## Configure Calico BGP [optional]
 
-In this example, we want Calico to work in underlay mode and announce the Spiderpool subnet (`10.244.0.0/16`) to the BGP router via the BGP protocol, ensuring that clients outside the cluster can directly access the real IP addresses of the Pods through BGP router.
+In this example, we want Calico to work in underlay mode and announce the subnet where Spiderpool's IPPool resides (`10.244.0.0/16`) to the BGP router via the BGP protocol, ensuring that clients outside the cluster can directly access the real IP addresses of the Pods through BGP router.
 
 > If you don't need external clients to access pod IPs directly, skip this step.
 
 The network topology is as follows:
 
-![calico-bgp](../images/calico-bgp.svg)
+![calico-bgp](../../../images/calico-bgp.svg)
 
 1. Configure a host outside the cluster as BGP Router
 
@@ -223,8 +225,7 @@ spec:
   template:
     metadata:
       annotations:
-        ipam.spidernet.io/subnet: '{"ipv4":["nginx-subnet-v4"]}'
-        ipam.spidernet.io/ippool-ip-number: '+3'
+        ipam.spidernet.io/ippool: '{"ipv4":["nginx-ippool-v4"]}' # (1)
       labels:
         app: nginx
     spec:
@@ -239,22 +240,17 @@ spec:
 EOF
 ```
 
-> `ipam.spidernet.io/subnet`: Assign static IPs from "nginx-subnet-v4" SpiderSubnet
->
-> `ipam.spidernet.io/ippool-ip-number`: '+3' means the number of static IPs allocated to the application is three more than the number of its replicas, guaranteeing available temporary IPs during application rolling updates.
+1. Assign static IPs from "nginx-ippool-v4" SpiderIPPool
 
-When a Pod is created, Spiderpool automatically creates an IP pool named `auto-nginx-v4-eth0-452e737e5e12` from `subnet: nginx-subnet-v4` specified in the annotations and binds it to the Pod. The IP range is `10.244.100.90-10.244.100.95`, and the number of IPs in the pool is `5`:
+When the application Pod is created, Spiderpool assigns the IP to the Pod from the `ippool: nginx-ippool-v4` specified in the annotations.
 
 ```shell
 [root@master1 ~]# kubectl get sp
-NAME                              VERSION   SUBNET          ALLOCATED-IP-COUNT   TOTAL-IP-COUNT   DEFAULT   DISABLE
-auto-nginx-v4-eth0-452e737e5e12   4         10.244.0.0/16   2                    5                false     false
-
-[root@master ~]# kubectl get sp auto-nginx-v4-eth0-452e737e5e12 -o jsonpath='{.spec.ips}' 
-["10.244.100.90-10.244.100.95"]
+NAME              VERSION   SUBNET          ALLOCATED-IP-COUNT   TOTAL-IP-COUNT   DEFAULT   DISABLE
+nginx-ippool-v4   4         10.244.0.0/16   2                    25602            false     false
 ```
 
-When the replicas restart, its IP is fixed within the IP pool range of `auto-nginx-v4-eth0-452e737e5e12`:
+When replicas are restarted, their IPs are fixed within the range of the `nginx-ippool-v4` IPPool:
 
 ```shell
 [root@master1 ~]# kubectl get po -o wide
@@ -263,7 +259,7 @@ nginx-644659db67-szgcg   1/1     Running       0          23s     10.244.100.90 
 nginx-644659db67-98rcg   1/1     Running       0          23s     10.244.100.92    master1   <none>           <none>
 ```
 
-When the replica count increases to `3`, the IP address of the new replica is still assigned from the automatic pool: `auto-nginx-v4-eth0-452e737e5e12(10.244.100.90-10.244.100.95)`
+Expand the number of replicas to `3`, the IP address of the new replica is still allocated from the IPPool: `nginx-ippool-v4`:
 
 ```shell
 [root@master1 ~]# kubectl scale deploy nginx --replicas 3  # scale pods
@@ -276,12 +272,12 @@ nginx-644659db67-98rcg   1/1     Running       0          1m     10.244.100.92  
 nginx-644659db67-brqdg   1/1     Running       0          10s    10.244.100.94    master1   <none>           <none>
 ```
 
-Check if both `ALLOCATED-IP-COUNT` and `TOTAL-IP-COUNT` of the automatic pool `auto-nginx-v4-eth0-452e737e5e12` increase by 1:
+View IP pool: Added 1 to `ALLOCATED-IP-COUNT` of `nginx-ippool-v4`:
 
 ```shell
 [root@master1 ~]# kubectl get sp
-NAME                              VERSION   SUBNET          ALLOCATED-IP-COUNT   TOTAL-IP-COUNT   DEFAULT   DISABLE
-auto-nginx-v4-eth0-452e737e5e12   4         10.244.0.0/16   3                    6                false     false
+NAME              VERSION   SUBNET          ALLOCATED-IP-COUNT   TOTAL-IP-COUNT   DEFAULT   DISABLE
+nginx-ippool-v4   4         10.244.0.0/16   3                    5                false     false
 ```
 
 ## Conclusion

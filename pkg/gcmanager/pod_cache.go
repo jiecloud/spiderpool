@@ -12,9 +12,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	"github.com/spidernet-io/spiderpool/pkg/constant"
 	"github.com/spidernet-io/spiderpool/pkg/lock"
+	"github.com/spidernet-io/spiderpool/pkg/logutils"
+	"github.com/spidernet-io/spiderpool/pkg/nodemanager"
 	"github.com/spidernet-io/spiderpool/pkg/types"
 )
 
@@ -29,6 +32,7 @@ type PodEntry struct {
 	PodName   string
 	Namespace string
 	NodeName  string
+	UID       string
 
 	EntryUpdateTime     time.Time
 	TracingStartTime    time.Time
@@ -94,7 +98,6 @@ func (p *PodDatabase) ApplyPodEntry(podEntry *PodEntry) error {
 	podCache, ok := p.pods[ktypes.NamespacedName{Namespace: podEntry.Namespace, Name: podEntry.PodName}]
 	if !ok {
 		if len(p.pods) == p.maxCap {
-			// TODO (Icarus9913): add otel metric
 			p.Unlock()
 			return fmt.Errorf("podEntry database is out of capacity, discard podEntry '%+v'", *podEntry)
 		}
@@ -133,13 +136,13 @@ func (s *SpiderGC) buildPodEntry(oldPod, currentPod *corev1.Pod, deleted bool) (
 		return nil, nil
 	}
 
-	// TODO(Icarus9913): Replace with method GetPodTopController.
 	ownerRef := metav1.GetControllerOf(currentPod)
+	ctx := context.TODO()
 
 	// check StatefulSet pod, we will trace it if its controller StatefulSet object was deleted or decreased its replicas and the pod index was out of the replicas.
 	if s.gcConfig.EnableStatefulSet && ownerRef != nil &&
 		ownerRef.APIVersion == appsv1.SchemeGroupVersion.String() && ownerRef.Kind == constant.KindStatefulSet {
-		isValidStsPod, err := s.stsMgr.IsValidStatefulSetPod(context.TODO(), currentPod.Namespace, currentPod.Name, ownerRef.Kind)
+		isValidStsPod, err := s.stsMgr.IsValidStatefulSetPod(ctx, currentPod.Namespace, currentPod.Name, ownerRef.Kind)
 		if nil != err {
 			return nil, err
 		}
@@ -151,12 +154,28 @@ func (s *SpiderGC) buildPodEntry(oldPod, currentPod *corev1.Pod, deleted bool) (
 		}
 	}
 
+	// check kubevirt vm pod, we will trace it if its controller is no longer exist
+	if s.gcConfig.EnableKubevirtStaticIP && ownerRef != nil &&
+		ownerRef.APIVersion == kubevirtv1.SchemeGroupVersion.String() && ownerRef.Kind == constant.KindKubevirtVMI {
+		isValidVMPod, err := s.kubevirtMgr.IsValidVMPod(logutils.IntoContext(ctx, logger), currentPod.Namespace, ownerRef.Kind, ownerRef.Name)
+		if nil != err {
+			return nil, err
+		}
+
+		if isValidVMPod {
+			logger.Sugar().Debugf("the kubevirt vm pod '%s/%s' just restarts, keep its IPs", currentPod.Namespace, currentPod.Name)
+			return nil, nil
+		}
+	}
+
 	// deleted pod
 	if deleted {
+
 		podEntry := &PodEntry{
 			PodName:             currentPod.Name,
 			Namespace:           currentPod.Namespace,
 			NodeName:            currentPod.Spec.NodeName,
+			UID:                 string(currentPod.UID),
 			EntryUpdateTime:     metav1.Now().UTC(),
 			TracingStartTime:    metav1.Now().UTC(),
 			TracingGracefulTime: time.Duration(s.gcConfig.AdditionalGraceDelay) * time.Second,
@@ -207,9 +226,19 @@ func (s *SpiderGC) buildPodEntry(oldPod, currentPod *corev1.Pod, deleted bool) (
 		}
 
 		if isBuildTerminatingPodEntry {
-			// disable for gc terminating pod
-			if !s.gcConfig.EnableGCForTerminatingPod {
-				logger.Sugar().Debugf("IP gc already turn off 'EnableGCForTerminatingPod' configuration, disacrd tracing pod '%s/%s'", currentPod.Namespace, currentPod.Name)
+			// check terminating Pod corresponding Node status
+			node, err := s.nodeMgr.GetNodeByName(ctx, currentPod.Spec.NodeName, constant.UseCache)
+			if nil != err {
+				return nil, fmt.Errorf("failed to get terminating Pod '%s/%s' corredponing Node '%s', error: %v", currentPod.Namespace, currentPod.Name, currentPod.Spec.NodeName, err)
+			}
+			// disable for gc terminating pod with Node Ready
+			if nodemanager.IsNodeReady(node) && !s.gcConfig.EnableGCStatelessTerminatingPodOnReadyNode {
+				logger.Sugar().Debugf("IP GC already turn off 'EnableGCForTerminatingPodWithNodeReady' configuration, disacrd tracing pod '%s/%s'", currentPod.Namespace, currentPod.Name)
+				return nil, nil
+			}
+			// disable for gc terminating pod with Node NotReady
+			if !nodemanager.IsNodeReady(node) && !s.gcConfig.EnableGCStatelessTerminatingPodOnNotReadyNode {
+				logger.Sugar().Debugf("IP GC already turn off 'EnableGCForTerminatingPodWithNodeNotReady' configuration, disacrd tracing pod '%s/%s'", currentPod.Namespace, currentPod.Name)
 				return nil, nil
 			}
 
@@ -218,6 +247,7 @@ func (s *SpiderGC) buildPodEntry(oldPod, currentPod *corev1.Pod, deleted bool) (
 				Namespace:        currentPod.Namespace,
 				NodeName:         currentPod.Spec.NodeName,
 				EntryUpdateTime:  metav1.Now().UTC(),
+				UID:              string(currentPod.UID),
 				TracingStartTime: currentPod.DeletionTimestamp.Time,
 				PodTracingReason: podStatus,
 			}
@@ -237,6 +267,7 @@ func (s *SpiderGC) buildPodEntry(oldPod, currentPod *corev1.Pod, deleted bool) (
 				PodName:          currentPod.Name,
 				Namespace:        currentPod.Namespace,
 				NodeName:         currentPod.Spec.NodeName,
+				UID:              string(currentPod.UID),
 				EntryUpdateTime:  metav1.Now().UTC(),
 				PodTracingReason: podStatus,
 			}

@@ -18,7 +18,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 func GenerateExampleDeploymentYaml(dpmName, namespace string, replica int32) *appsv1.Deployment {
@@ -31,7 +31,7 @@ func GenerateExampleDeploymentYaml(dpmName, namespace string, replica int32) *ap
 			Name:      dpmName,
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: pointer.Int32(replica),
+			Replicas: ptr.To(replica),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app": dpmName,
@@ -49,7 +49,72 @@ func GenerateExampleDeploymentYaml(dpmName, namespace string, replica int32) *ap
 							Name:            "samplepod",
 							Image:           "alpine",
 							ImagePullPolicy: "IfNotPresent",
-							Command:         []string{"/bin/ash", "-c", "sleep infinity"},
+							Command:         []string{"/bin/ash", "-c", "while true; do echo 'HTTP/1.1 200 OK Hello, World!' | nc -l -p 80; done"},
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "samplepod",
+									ContainerPort: 80,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func GenerateDraDeploymentYaml(dpmName, claim, namespace string, replica int32) *appsv1.Deployment {
+	Expect(dpmName).NotTo(BeEmpty())
+	Expect(claim).NotTo(BeEmpty())
+	Expect(namespace).NotTo(BeEmpty())
+
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      dpmName,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr.To(replica),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": dpmName,
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": dpmName,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:            "samplepod",
+							Image:           "alpine",
+							ImagePullPolicy: "IfNotPresent",
+							Command:         []string{"/bin/ash", "-c", "while true; do echo 'HTTP/1.1 200 OK Hello, World!' | nc -l -p 80; done"},
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "samplepod",
+									ContainerPort: 80,
+								},
+							},
+							Resources: corev1.ResourceRequirements{
+								Claims: []corev1.ResourceClaim{
+									{
+										Name: claim,
+									},
+								},
+							},
+						},
+					},
+					ResourceClaims: []corev1.PodResourceClaim{
+						{
+							Name: claim,
+							Source: corev1.ClaimSource{
+								ResourceClaimTemplateName: ptr.To(claim),
+							},
 						},
 					},
 				},

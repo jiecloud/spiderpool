@@ -42,17 +42,12 @@ func TestIPPoolManager(t *testing.T) {
 	defer mockCtrl.Finish()
 
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "IPPoolManager Suite", Label("ippoolmanager", "unitest"))
+	RunSpecs(t, "IPPoolManager Suite", Label("ippoolmanager", "unittest"))
 }
 
 var _ = BeforeSuite(func() {
-	_, err := metric.InitMetric(context.TODO(), constant.SpiderpoolAgent, false, false)
-	Expect(err).NotTo(HaveOccurred())
-	err = metric.InitSpiderpoolAgentMetrics(context.TODO())
-	Expect(err).NotTo(HaveOccurred())
-
 	scheme = runtime.NewScheme()
-	err = spiderpoolv2beta1.AddToScheme(scheme)
+	err := spiderpoolv2beta1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	fakeClient = fake.NewClientBuilder().
@@ -61,11 +56,23 @@ var _ = BeforeSuite(func() {
 			ipPool := raw.(*spiderpoolv2beta1.SpiderIPPool)
 			return []string{ipPool.GetObjectMeta().GetName()}
 		}).
-		WithIndex(&spiderpoolv2beta1.SpiderIPPool{}, "spec.default", func(raw client.Object) []string {
+		WithIndex(&spiderpoolv2beta1.SpiderIPPool{}, constant.SpecDefaultField, func(raw client.Object) []string {
 			ipPool := raw.(*spiderpoolv2beta1.SpiderIPPool)
 			return []string{strconv.FormatBool(*ipPool.Spec.Default)}
 		}).
+		WithIndex(&spiderpoolv2beta1.SpiderIPPool{}, constant.SpecIPVersionField, func(raw client.Object) []string {
+			ipPool := raw.(*spiderpoolv2beta1.SpiderIPPool)
+			if ipPool.Spec.IPVersion != nil {
+				return []string{strconv.FormatInt(*ipPool.Spec.IPVersion, 10)}
+			}
+			return []string{}
+		}).
+		WithStatusSubresource(&spiderpoolv2beta1.SpiderIPPool{}).
 		Build()
+	_, err = metric.InitMetric(context.TODO(), constant.SpiderpoolAgent, false, false)
+	Expect(err).NotTo(HaveOccurred())
+	err = metric.InitSpiderpoolAgentMetrics(context.TODO(), nil)
+	Expect(err).NotTo(HaveOccurred())
 
 	tracker = k8stesting.NewObjectTracker(scheme, k8sscheme.Codecs.UniversalDecoder())
 	fakeAPIReader = fake.NewClientBuilder().
@@ -75,16 +82,19 @@ var _ = BeforeSuite(func() {
 			ipPool := raw.(*spiderpoolv2beta1.SpiderIPPool)
 			return []string{ipPool.GetObjectMeta().GetName()}
 		}).
-		WithIndex(&spiderpoolv2beta1.SpiderIPPool{}, "spec.default", func(raw client.Object) []string {
+		WithIndex(&spiderpoolv2beta1.SpiderIPPool{}, constant.SpecDefaultField, func(raw client.Object) []string {
 			ipPool := raw.(*spiderpoolv2beta1.SpiderIPPool)
 			return []string{strconv.FormatBool(*ipPool.Spec.Default)}
 		}).
+		WithStatusSubresource(&spiderpoolv2beta1.SpiderIPPool{}).
 		Build()
 
 	mockLeaderElector = electionmock.NewMockSpiderLeaseElector(mockCtrl)
 	mockRIPManager = reservedipmanagermock.NewMockReservedIPManager(mockCtrl)
 	ipPoolManager, err = ippoolmanager.NewIPPoolManager(
-		ippoolmanager.IPPoolManagerConfig{},
+		ippoolmanager.IPPoolManagerConfig{
+			EnableKubevirtStaticIP: true,
+		},
 		fakeClient,
 		fakeAPIReader,
 		mockRIPManager,

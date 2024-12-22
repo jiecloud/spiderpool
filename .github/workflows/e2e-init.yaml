@@ -20,6 +20,7 @@ on:
       k8s_version:
         required: false
         type: string
+        default: v1.29.0
       run_e2e:
         required: false
         type: string
@@ -27,23 +28,51 @@ on:
       e2e_labels:
         required: false
         type: string
+      os:
+        required: false
+        type: string
+        default: ubuntu-latest
 
 jobs:
   call_e2e:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - e2e_init_mode: e2e_init_underlay
-            e2e_test_mode: e2e_test_underlay
-          - e2e_init_mode: e2e_init_underlay_subnet
-            e2e_test_mode: e2e_test_underlay_subnet
+          - e2e_init_mode: e2e_init_spiderpool
+            e2e_test_mode: e2e_test_spiderpool
+          - e2e_init_mode: e2e_init_cilium_ebpfservice
+            e2e_test_mode: e2e_test_cilium_ebpfservice
           - e2e_init_mode: e2e_init_calico
             e2e_test_mode: e2e_test_calico
-          - e2e_init_mode: e2e_init_cilium
-            e2e_test_mode: e2e_test_cilium
+          - e2e_init_mode: e2e_init_cilium_legacyservice
+            e2e_test_mode: e2e_test_cilium_legacyservice
     steps:
+      - name: Show system kernel
+        run: |
+          echo "=========Current os version================="
+          echo ${{ inputs.os }}
+          echo "=========Current system kernel================="
+          uname -r
+
+      - name: Free Disk Space (Ubuntu)
+        # https://github.com/spidernet-io/spiderpool/issues/3277
+        # https://github.com/actions/virtual-environments/issues/709
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # this might remove tools that are actually needed,
+          # if set to "true" but frees about 6 GB
+          tool-cache: false
+          # all of these default to true, but feel free to set to
+          # "false" if necessary for your workflow
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
       - name: Prepare
         id: prepare
         run: |
@@ -59,22 +88,15 @@ jobs:
           echo "kind node image tag: ${{ inputs.k8s_version }}"
 
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
           ref: ${{ inputs.ref }}
 
       - name: Setup Golang
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
-          go-version: 1.20.0
-          id: go
-
-      # https://github.com/helm/kind-action
-      - name: Install Kind Bin
-        uses: helm/kind-action@v1.7.0
-        with:
-          install_only: true
+          go-version: 1.23.4
 
       - name: Install Tools
         run: |
@@ -100,23 +122,74 @@ jobs:
           for ITEM in $TAR_FILES ; do
               IMAGE_NAME=${ITEM%*.tar}
               echo ${IMAGE_NAME}
-              cat test/.download/${ITEM} | docker import - ${IMAGE_NAME}:${{ inputs.image_tag }}
+              docker load -i test/.download/${ITEM}
+              echo "list docker images" && docker images
+              ITEM_IMAGE_ID=$(docker images | grep ${IMAGE_NAME%*-race}| grep ${{ inputs.image_tag }} | awk '{print $3}')
+              docker tag ${ITEM_IMAGE_ID} ${IMAGE_NAME}:${{ inputs.image_tag }}
           done
+          echo "list all docker images"
+          docker images
 
       # test against commit version
+      # https://github.com/kubernetes-sigs/kind/issues/2863
       - name: Setup Kind Cluster
-        uses: nick-invision/retry@v2
+        uses: nick-invision/retry@v3
         with:
           timeout_minutes: 20
           max_attempts: 3
-          shell: bash
+          on_retry_command: |
+            echo "debug"
+            systemctl status docker
+            journalctl -xeu docker
+            echo "restart docker before trying again"
+            systemctl restart docker
           command: |
+            INSTALL_OVS_VALUE=true
+            MINIMAL_VERSION=1.24.3
+            K8S_VERSION=$(echo ${{ inputs.k8s_version }} | grep -Eo "([0-9]+\.[0-9]+)")
+            if [[ "${K8S_VERSION}" < "${MINIMAL_VERSION}" ]]; then
+              echo "The current kubernetes version is ${{ inputs.k8s_version }} , ignore to install openvswitch due to Kind base image outdated"
+              INSTALL_OVS_VALUE=false;
+            fi
+            RESULT=0
             make ${{ matrix.e2e_init_mode }} -e E2E_CLUSTER_NAME=${{ env.E2E_CLUSTER_NAME }} \
                 -e E2E_SPIDERPOOL_TAG=${{ inputs.image_tag }} \
                 -e SPIDERPOOL_AGENT_IMAGE_NAME=spiderpool-agent-race   \
                 -e SPIDERPOOL_CONTROLLER_IMAGE_NAME=spiderpool-controller-race \
                 -e E2E_IP_FAMILY=${{ inputs.ip_family }} -e PYROSCOPE_LOCAL_PORT="" \
-                -e E2E_KIND_IMAGE_TAG=${{ inputs.k8s_version }}
+                -e E2E_KIND_IMAGE_TAG=${{ inputs.k8s_version }} \
+                -e INSTALL_KUBEVIRT=true \
+                -e INSTALL_KRUISE=true \
+                -e INSTALL_KDOCTOR=true \
+                -e INSTALL_OVS=${INSTALL_OVS_VALUE} \
+                -e INSTALL_RDMA=true \
+                -e INSTALL_SRIOV=true || RESULT=1
+            if ((RESULT==0)) ; then
+              echo "RUN_SETUP_KIND_CLUSTER_PASS=true" >> $GITHUB_ENV
+            else
+              echo "RUN_SETUP_KIND_CLUSTER_PASS=false" >> $GITHUB_ENV
+            fi
+            if [ -f "test/e2edebugLog.txt" ] ; then
+              echo "UPLOAD_SETUP_KIND_CLUSTER_LOG=true" >> $GITHUB_ENV
+            else
+              echo "UPLOAD_SETUP_KIND_CLUSTER_LOG=false" >> $GITHUB_ENV
+            fi
+
+      - name: Upload Setup Kind Cluster log
+        if: ${{ env.RUN_SETUP_KIND_CLUSTER_PASS == 'false' && env.UPLOAD_SETUP_KIND_CLUSTER_LOG == 'true' }}
+        uses: actions/upload-artifact@v3.1.3
+        with:
+          name: ${{ inputs.os }}-${{ inputs.ip_family }}-${{ matrix.e2e_test_mode }}-${{ inputs.k8s_version }}-setupkind.txt
+          path: test/e2edebugLog.txt
+          retention-days: 7
+
+      - name: Show Setup Kind Cluster Result
+        run: |
+          if ${{ env.RUN_SETUP_KIND_CLUSTER_PASS == 'true' }} ;then
+              exit 0
+          else
+              exit 1
+          fi
 
       - name: Run e2e Test
         id: run_e2e
@@ -128,6 +201,7 @@ jobs:
           RESULT=0
           make ${{ matrix.e2e_test_mode }} -e E2E_CLUSTER_NAME=${{ env.E2E_CLUSTER_NAME }}  \
               -e E2E_GINKGO_LABELS=${E2E_LABELS} \
+              -e E2E_KIND_IMAGE_TAG=${{ inputs.k8s_version }} \
               -e E2E_TIMEOUT=${{ env.E2E_TIME_OUT }} \
               -e E2E_IP_FAMILY=${{ inputs.ip_family }} || RESULT=1
           if ((RESULT==0)) ; then
@@ -141,25 +215,25 @@ jobs:
               echo "UPLOAD_E2E_LOG=false" >> $GITHUB_ENV
           fi
           if [ -f "./e2ereport.json" ] ; then
-              echo "error, did not find e2e report"
               echo "UPLOAD_E2E_REPORT=true" >> $GITHUB_ENV
           else
+              echo "error, did not find e2e report"
               echo "UPLOAD_E2E_REPORT=false" >> $GITHUB_ENV
           fi
 
       - name: Upload e2e log
         if: ${{ inputs.run_e2e == 'true' }}
-        uses: actions/upload-artifact@v3.1.2
+        uses: actions/upload-artifact@v3.1.3
         with:
-          name: ${{ inputs.ip_family }}-${{ matrix.e2e_test_mode }}-${{ inputs.k8s_version }}-debuglog.txt
+          name: ${{ inputs.os }}-${{ inputs.ip_family }}-${{ matrix.e2e_test_mode }}-${{ inputs.k8s_version }}-debuglog.txt
           path: test/e2edebugLog.txt
           retention-days: 7
 
       - name: Upload e2e report
         if: ${{ env.UPLOAD_E2E_REPORT == 'true' }}
-        uses: actions/upload-artifact@v3.1.2
+        uses: actions/upload-artifact@v3.1.3
         with:
-          name: ${{ inputs.ip_family }}-${{ matrix.e2e_test_mode }}-${{ inputs.k8s_version }}-e2ereport.json
+          name: ${{ inputs.os }}-${{ inputs.ip_family }}-${{ matrix.e2e_test_mode }}-${{ inputs.k8s_version }}-e2ereport.json
           path: e2ereport.json
           retention-days: 1
 
@@ -174,16 +248,19 @@ jobs:
 
       - name: Get the E2E Performance Result For Dual-stack
         id: get_performance
-        if: ${{ inputs.run_e2e == 'true' && inputs.ip_family == 'dual' && ( matrix.e2e_test_mode == 'e2e_test_underlay' || matrix.e2e_test_mode == 'e2e_test_underlay_subnet' ) }}
+        if: ${{ inputs.run_e2e == 'true' && inputs.ip_family == 'dual' && matrix.e2e_test_mode == 'e2e_test_spiderpool' }}
+        continue-on-error: true
         shell: bash
         run: |
           # sudo apt-get install -y jq
           TOOL_PATH=${{ env.PERFORMANCESCRIPT }}
           TODO_STATUS=$( ${TOOL_PATH}  "e2ereport.json"  )
           echo "PERFORMANCE_RESULT=${TODO_STATUS}" >> $GITHUB_ENV
+          [ -z ${{ env.PERFORMANCE_RESULT }} ] || { echo "error, miss spiderpool performance result " ; exit 1 ; }
 
       - name: Update Badge For Dual-stack
         if: ${{ inputs.run_e2e == 'true' && env.PERFORMANCE_RESULT != '' && inputs.ip_family == 'dual' }}
+        continue-on-error: true
         uses: schneegans/dynamic-badges-action@v1.6.0
         with:
           auth: ${{ secrets.WELAN_PAT }}
@@ -192,3 +269,39 @@ jobs:
           label: performance
           message: ${{ env.PERFORMANCE_RESULT }}
           color: lightgrey
+
+      - name: Uninstall Spiderpool
+        if: ${{ inputs.run_e2e == 'true' }}
+        run: |
+          RESULT=0
+          make clean_e2e_spiderpool || RESULT=1
+          if ((RESULT==0)) ; then
+              echo "UNINSTALL_E2E_PASS=true" >> $GITHUB_ENV
+              echo "succeeded to uninstall spiderpool"
+          else
+              echo "UNINSTALL_E2E_PASS=false" >> $GITHUB_ENV
+              echo "failed to uninstall spiderpool"
+          fi
+
+          if [ -f "test/e2e-uninstall-debugLog.txt" ] ; then
+              echo "UPLOAD_UNINSTALL_E2E_LOG=true" >> $GITHUB_ENV
+          else
+              echo "UPLOAD_UNINSTALL_E2E_LOG=false" >> $GITHUB_ENV
+          fi
+
+      - name: Upload Uninstall Spiderpool e2e log
+        if: ${{ env.UNINSTALL_E2E_PASS == 'false' && env.UPLOAD_UNINSTALL_E2E_LOG == 'true' }}
+        uses: actions/upload-artifact@v3.1.3
+        with:
+          name: ${{ inputs.os }}-${{ inputs.ip_family }}-${{ matrix.e2e_test_mode }}-${{ inputs.k8s_version }}-uninstall-debugLog.txt
+          path: test/e2e-uninstall-debugLog.txt
+          retention-days: 7
+
+      - name: Show uninstall e2e Result
+        if: ${{ inputs.run_e2e == 'true' }}
+        run: |
+          if ${{ env.UNINSTALL_E2E_PASS == 'true' }} ;then
+              exit 0
+          else
+              exit 1
+          fi

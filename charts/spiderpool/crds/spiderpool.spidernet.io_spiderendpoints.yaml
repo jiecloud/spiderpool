@@ -4,7 +4,6 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: (unknown)
-  creationTimestamp: null
   name: spiderendpoints.spiderpool.spidernet.io
 spec:
   group: spiderpool.spidernet.io
@@ -99,8 +98,9 @@ spec:
                           type: array
                         vlan:
                           default: 0
+                          description: 'DEPRECATED: Vlan is deprecated.'
                           format: int64
-                          maximum: 4095
+                          maximum: 4094
                           minimum: 0
                           type: integer
                       required:

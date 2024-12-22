@@ -1,237 +1,165 @@
-# Spiderpool
+#
+
+![Spiderpool](./images/spiderpool.png)
+
+[![Go Report Card](https://goreportcard.com/badge/github.com/spidernet-io/spiderpool)](https://goreportcard.com/report/github.com/spidernet-io/spiderpool)
+[![codecov](https://codecov.io/gh/spidernet-io/spiderpool/branch/main/graph/badge.svg?token=YKXY2E4Q8G)](https://codecov.io/gh/spidernet-io/spiderpool)
+[![Auto Version Release](https://github.com/spidernet-io/spiderpool/actions/workflows/auto-version-release.yaml/badge.svg)](https://github.com/spidernet-io/spiderpool/actions/workflows/auto-version-release.yaml)
+[![Auto Nightly CI](https://github.com/spidernet-io/spiderpool/actions/workflows/auto-nightly-ci.yaml/badge.svg)](https://github.com/spidernet-io/spiderpool/actions/workflows/auto-nightly-ci.yaml)
+[![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/6009/badge)](https://bestpractices.coreinfrastructure.org/projects/6009)
+![badge](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/weizhoublue/7e54bfe38fec206e7710c74ad55a5139/raw/spiderpoolcodeline.json)
+![badge](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/weizhoublue/e1d3c092d1b9f61f1c8e36f09d2809cb/raw/spiderpoole2e.json)
+![badge](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/weizhoublue/cd9ef69f5ba8724cb4ff896dca953ef4/raw/spiderpooltodo.json)
+![badge](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/weizhoublue/38d00a872e830eedb46870c886549561/raw/spiderpoolperformance.json)
 
 [**English**](./README.md) | **简体中文**
 
-Spiderpool 是 [CNCF Landscape 项目](https://landscape.cncf.io/card-mode?category=cloud-native-network&grouping=category)。
+Spiderpool 是 [CNCF](https://www.cncf.io) 的一个 [Sandbox 项目](https://landscape.cncf.io/card-mode?category=cloud-native-network&grouping=category)。
 
-<img src="https://github.com/cncf/artwork/blob/master/other/illustrations/ashley-mcnamara/transparent/cncf-cloud-gophers-transparent.png" style="width:800px;" />
+Spiderpool 提供了一个 Kubernetes 的 underlay 和 RDMA 网络解决方案, 它能运行在裸金属、虚拟机和公有云上。
 
 ## Spiderpool 介绍
 
-Spiderpool 是一个 kubernetes 的 underlay 网络解决方案，它提供了丰富的 IPAM 和 CNI 整合能力，
-强大了开源社区中的现有 CNI 项目，让多 CNI 协同工作可真正落地，它使得 underlay CNI 能够完美地运行在
-**裸金属、虚拟机、任意公有云等环境下** 。
+Spiderpool 是一个 kubernetes 的 underlay 和 RDMA 网络解决方案，它增强了 [Macvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/macvlan)、
+[ipvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/ipvlan) 和
+[SR-IOV CNI](https://github.com/k8snetworkplumbingwg/sriov-cni) 的功能，满足了各种网络需求，使得 underlay 网络方案可应用在**裸金属、虚拟机和公有云环境**中，可为网络 I/O 密集性、低延时应用带来优秀的网络性能，包括**存储、中间件、AI 等应用**。详细的文档可参考[文档站](https://spidernet-io.github.io/spiderpool/)。
 
-为什么希望研发 Spiderpool? 当前开源社区中并未提供全面、友好、智能的 underlay 网络解决方案，Spiderpool 因此提供了很多创新的功能：
+## Underlay CNI 的优势
 
-* 丰富的 IPAM 能力。提供共享、独享的 IP 池，支持应用固定 IP 地址，自动化管理独享的 IP 池，实现固定 IP 地址的动态创建、扩容、缩容和回收等。
+underlay CNI 主要指 macvlan、ipvlan、SR-IOV 等能够直接访问宿主机二层网络的 CNI 技术，它有如下优势：
 
-* overlay CNI 和 underlay CNI 协同，Pod 具备多种 CNI 网卡。Spiderpool 能够定制多个
-  underlay CNI 网卡的 IP 地址，调协所有网卡之间的策略路由，以确保请求向和回复向数据路径一致而避免丢包。
-  多 CNI 协同能有效降低集群节点的硬件一致要求。
+* macvlan、ipvlan、SR-IOV 是承载 RDMA 网络加速的重要技术，RDMA 能为 AI 应用、延时敏感型应用、网络 I/O 密集型应用带来极大的性能提升，其网络性能大幅超过 overlay 网络解决方案。
 
-* 增强了开源社区中的 underlay CNI，如 [Macvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/macvlan)、
-  [ipvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/ipvlan)、
-  [SR-IOV CNI](https://github.com/k8snetworkplumbingwg/sriov-cni)、
-  [ovs CNI](https://github.com/k8snetworkplumbingwg/ovs-cni) 等等，
-  打通 Pod 和宿主机的连通性，使得 clusterIP 访问、应用本地健康检测等通信成功，并且支持 Pod 的 IP 冲突检测、网关可达性检测等。
+* 区别于基于 veth 虚拟网卡的 CNI 解决方案，underlay 网络数据包避免了宿主机的三层网络转发，没有隧道封装开销，因此，它们能为应用提供了优秀的网络性能，包括优秀的网络吞吐量、低延时，节省了 CPU 的网络转发开销。
 
-* 不仅限于应用在数据中心的裸金属环境，同时也为 openstack、vmware 和各种公有云场景，提供了统一的 underlay CNI 解决方案。
+* 可直接对接 underlay 二层 VLAN 网络，应用可进行二层、三层网络通信，可进行组播、多播通信，数据包可受防火墙管控。
 
-## underlay CNI
+* 数据包携带 Pod 的真正 IP 地址，应用可直接基于 Pod IP 进行南北向通信，多云网络天然联通。
 
-云原生网络中出现了两种技术类别，"overlay 网络方案"和 "underlay 网络方案"，
-云原生网络对于它们没有严格的定义，我们可以从很多 CNI 项目的实现原理中，简单抽象出这两种技术流派的特点，它们可以满足不同场景下的需求。
+* underlay CNI 可基于宿主机不同的父网卡来创建虚拟机接口，因此可为存储、观测性等网络开销大的应用提供隔离的子网。
 
-[文章](./concepts/solution-zh_CN.md) 对两种方案的 IPAM 和网络性能做了简单比较，能够更好说明 Spiderpool 的特点和使用场景。
+## Spiderpool 核心功能
 
-为什么需要 underlay 网络解决方案？存在很多应用场景：
+![arch](./images/arch.png)
 
-* 高性能网络需求的应用，underlay 网络方案能比 overlay 网络方案提供低网络延时、高吞吐量的优势。
+* 简化安装和使用
 
-* 传统的主机应用，通过主机 IP 来直接暴露服务，不能接受 NAT 映射，或者业务已经基于 VLAN 子网进行了分离。
-  它们在上云初期，underlay 网络方案能够提供较低的云化网络迁移成本。
+    当前开源社区对于 underlay CNI 和 RDMA 的使用，需要手动安装 [Multus CNI](https://github.com/k8snetworkplumbingwg/multus-cni) 、RDMA、SR-IOV 等诸多相关组件，Spiderpool 简化了安装流程和运行 POD 数量，对相关的 CRD 进行了封装，提供了各种场景的完备文档，使得使用、管理更加便捷。
 
-* 网络安全的管控需求，例如基于防火墙、VLAN 隔离等手段实施网络安全管控，例如使用传统的网络观测手段实施集群网络监控。
+* 基于 CRD 的双栈 IPAM 能力
 
-* underlay 网络方案能够灵活定制应用接入的 VLAN 子网，不同业务的应用因此可实施独立的子网规划，保障底层子网的业务带宽隔离，
-  适用于如 [kubevirt](https://github.com/kubevirt/kubevirt)、CSI 存储项目、日志采集项目等。
+    提供了独享、共享的 IP 地址池，支持设置各种亲和性，为中间件等有状态应用和 kubevirt 等固定 IP 地址值，为无状态应用固定 IP 地址范围，自动化管理独享的 IP 池，优秀的 IP 回收避免 IP 泄露等。并且，具备优秀的 [IPAM 分配性能](./concepts/ipam-performance-zh_CN.md)。
 
-## 架构
+    Spiderpool IPAM 组件能够为任何支持第三方 IPAM 的 main CNI 使用，不仅包含了 [Macvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/macvlan)、[ipvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/ipvlan) 和 [SR-IOV CNI](https://github.com/k8snetworkplumbingwg/sriov-cni)，也包括了 [calico](https://github.com/projectcalico/calico) 和 [weave](https://github.com/weaveworks/weave) 作为静态 IP 场景使用。
 
-![arch](./images/spiderpool-arch.jpg)
+* underlay 和 overlay CNI 的多网卡接入
 
-Spiderpool 架构如上所示，包含了以下组件：
+    它包括了 “Pod 插入多个 underlay CNI 网卡”、“Pod 插入一个 overlay CNI 和 多个 underlay CNI 网卡”两种场景，Pod 具备多种 CNI 网卡，Spiderpool 能够为多个
+    underlay CNI 网卡定制不同的 IP 地址，调协所有网卡之间的策略路由，以确保请求向和回复向数据路径一致而避免丢包。它能够为 [cilium](https://github.com/cilium/cilium)、[calico](https://github.com/projectcalico/calico) 和 [kubevirt](https://github.com/kubevirt/kubevirt) 等项目进行增强。
 
-* Spiderpool controller：是一组 deployment，实现了对各种 CRD 校验、状态更新、IP 回收、自动 IP 池的管理等
+* 增强网络连通性
 
-* Spiderpool agent：是一组 daemonset，其帮助 Spiderpool plugin 实现 IP 分配，帮助 coordinator plugin 实现信息同步
+    众所周知，原生的 macvlan ipvlan SR-IOV 存在诸多通信限制。但是，Spiderpool 打通 Pod 和宿主机的连通性，确保 Pod 健康检测工作正常，并可通过 kube-proxy 或 eBPF kube-proxy replacement 使得 Pod 访问 service，支持 Pod 的 IP 冲突检测、网关可达性检测等。多集群网络可基于相同的 underlay 网络或者 [Submariner](https://github.com/submariner-io/submariner) 实现联通。
 
-* Spiderpool plugin：在每个主机上的二进制插件，供 CNI 调用，实现 IP 分配
+* eBPF 增强
 
-* coordinator plugin：在每个主机上的二进制插件，供 CNI 调用，实现多网卡路由调协、IP 冲突检查、宿主机联通等
+    kube-proxy replacement 技术极大加速了访问 service 场景，同节点上的 socket 短路技术加速了本地 Pod 的通信效率。相比 kube proxy 解析方式，[网络延时有最大 25% 的改善，网络吞吐有 50% 的提高](./concepts/io-performance-zh_CN.md)。
 
-* ifacer plugin：在每个主机上的二进制插件，帮助 macvlan 、ipvlan 等 CNI 动态创建 bond 和 vlan 子接口
+* RDMA
 
-除了以上 Spiderpool 自身的组件以外，还需要配合某个开源的 underlay CNI 来给 Pod 分配网卡，
-可配合 [Multus CNI](https://github.com/k8snetworkplumbingwg/multus-cni) 来实施多网卡和 CNI 配置管理。
+    提供了基于 RoCE、infiniband 场景下的 RDMA 解决方案，POD 能够独享或共享使用 RDMA 设备，适合 AI 等网络性能需求高的应用。
 
-任何支持第三方 IPAM 插件的 CNI 项目，都可以配合 Spiderpool，例如：
-[Macvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/macvlan)、
-[vlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/vlan)、
-[ipvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/ipvlan)、
-[SR-IOV CNI](https://github.com/k8snetworkplumbingwg/sriov-cni)、
-[ovs CNI](https://github.com/k8snetworkplumbingwg/ovs-cni)、
-[Multus CNI](https://github.com/k8snetworkplumbingwg/multus-cni)、
-[Calico CNI](https://github.com/projectcalico/calico)、
-[Weave CNI](https://github.com/weaveworks/weave)
+* 网络双栈支持
 
-## 应用场景：一个或多个 underlay CNI 协同
+    Spiderpool 组件和其提供的所有功能，支持 ipv4-only、ipv6-only、dual-stack 场景。
 
-![arch_underlay](./images/spiderpool-underlay.jpg)
+* 优秀的网络延时和吞吐量性能
 
-如上所示，Spiderpool 工作在 underlay 模式下，可配合 underlay CNI
-（例如 [Macvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/macvlan)、
-[SR-IOV CNI](https://github.com/k8snetworkplumbingwg/sriov-cni) ）实现：
+    Spiderpool 在网络延时和吞吐量方面表现出色，超过了 overlay CNI，可参考[性能报告](./concepts/io-performance-zh_CN.md)。
 
-* 为 underlay CNI 提供丰富的 IPAM 能力，包括共享/固定 IP、多网卡 IP 分配、双栈支持等
+* 指标
 
-* 为 Pod 接入一个或者多个 underlay 网卡，并能调协多个 underlay CNI 网卡间的路由，
-  以实现请求向和回复向数据路径一致，确保网络通信畅通
+## 应用场景
 
-* 通过额外接入 veth 网卡和路由控制，帮助开源 underlay CNI 联通宿主机，实现 clusterIP 访问、应用的本地健康检测等
+Spiderpool 基于 underlay CNI 提供了比 overlay CNI 还优越的网络性能，可参考[性能报告](./concepts/io-performance-zh_CN.md)。具体可应用在如下：
 
-当一个集群中存在多种基础设置时，如何使用单一的 underlay CNI 来部署容器呢？
+* 支持运行在裸金属、虚拟机、各大公有云厂商等环境，尤其为混合云提供了统一的 underlay CNI 解决方案。
 
-* 在一个集群中，部分节点是虚拟机，例如未打开混杂转发模式的 vmware 虚拟机，而部分节点是裸金属，
-  接入了传统交换机网络。因此在两类节点上部署什么 CNI 方案呢？
+* 传统的主机应用。它们希望直接使用 underlay 网络进行通信，例如直接访问 underlay 多子网、多播、组播、二层网络通信等，它们不能接受 overlay 网络的 NAT，希望进行无缝移植的 Kubernetes。
 
-* 在一个集群中，部分裸金属节点只具备一张 SR-IOV 高速网卡，但只能提供 64 个 VF，如何在一个节点上运行更多的 Pod？
+* 中间件、数据存储、日志观测、AI 训练等网络 I/O 密集性应用。
 
-* 在一个集群中，部分裸金属节点具备 SR-IOV 高速网卡，可以运行低延时应用，部分节点不具备 SR-IOV 高速网卡，
-  可以运行普通应用。但在两类节点部署上什么 CNI 方案呢？
-
-结合 multus 的 CNI 配置管理和 Spiderpool IPAM 的通用性，可同时运行多种 underlay CNI，
-充分整合集群中各种基础设施节点的资源，来解决以上问题。
-
-![underlay](./images/underlay.jpg)
-
-例如上图所示，在同一个集群下具备不同网络能力的节点，有的节点具备 SR-IOV 网卡，可运行 SR-IOV CNI，
-有的节点具备普通的网卡，可运行 Macvlan CNI，有的节点网络访问受限（例如二层网络转发受限的 vmware 虚拟机），可运行 ipvlan CNI。
-
-## 应用场景：overlay CNI 和 underlay CNI 协同
-
-![arch_underlay](./images/spiderpool-overlay.jpg)
-
-如上所示，Spiderpool 工作在 overlay 模式下，使用 multus 同时为 Pod 插入一张 overlay 网卡
-（例如 [Calico](https://github.com/projectcalico/calico)、[Cilium](https://github.com/cilium/cilium) ）
-和若干张 underlay 网卡（例如 [Macvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/macvlan)、
-[SR-IOV CNI](https://github.com/k8snetworkplumbingwg/sriov-cni) ），可实现：
-
-* 为 underlay CNI 提供丰富的 IPAM 能力，包括共享/固定 IP、多网卡 IP 分配、双栈支持等
-
-* 为 Pod 的多个 underlay CNI 网卡和 overlay 网卡调协路由，以实现请求向和回复向数据路径一致，确保网络通信畅通
-
-* 以 overlay 网卡作为缺省网卡，并调协路由，通过 overlay 网卡联通本地宿主机，实现 clusterIP 访问、
-  应用的本地健康检测、overlay 网络流量通过 overlay 网络转发，而 underlay 网络流量通过 underlay 网卡转发。
-
-结合 multus 的 CNI 配置管理和 Spiderpool IPAM 的通用性，可同时运行一种 overlay CNI 和 多种 underlay CNI。
-例如，在同一个集群下具备不同网络能力的节点，裸金属节点上的 Pod 同时接入 overlay CNI 和 underlay CNI 网卡，
-虚拟机节点上的 Pod 只提供集群东西向服务，只接入 overlay CNI 网卡。带来了如下好处：
-
-* 把提供东西向服务的应用只接入 overlay 网卡，提供南北向服务的应用同时接入 overlay 和 underlay 网卡，
-  在保障集群内 Pod 连通性基础上，能够降低 underlay IP 资源的用量，减少相应的人工运维成本。
-
-* 充分整合虚拟机和裸金属节点资源。
-
-![overlay](./images/overlay.jpg)
-
-## 应用场景：underlay CNI 运行在公有云环境和虚拟机
-
-在公有云、openstack、vmvare 等环境下实施 underlay CNI，通常只能使用特定环境的厂商 CNI 插件，因为这些环境通常有如下限制：
-
-* IAAS 网络基础设施对虚拟机网卡发出的数据包，实施了二层报头中的 MAC 限制，一方面，对源 MAC 进行安全检查，
-  以确保源 MAC 地址与虚拟机网卡 MAC 相同，不支持未知目的 MAC。另一方面，对目的 MAC 做了限制，只支持转发
-  IAAS 中所有虚拟机网卡的 MAC，不支持未知目的 MAC。通常的 CNI 插件，Pod 分配的网卡的 MAC 地址是新生成的，这使得 Pod 通信失败。
-
-* IAAS 网络基础设施对虚拟机网卡发出的数据包，实施了三层报头的 IP 限制，只有数据包的目的和源 IP 是在 IAAS
-  中分配给了虚拟机网卡时，数据包才能得到转发。通常的 CNI 插件，给 Pod 分配的 IP 地址不符合 IAAS 设置，这使得 Pod 通信失败。
-
-Spiderpool 提供了节点拓扑的 IP 池功能，与虚拟机的相同 IP 分配设置对齐，再配合 ipvlan CNI，
-从而能够为各种公有云环境提供 underlay CNI 解决方案。
+* 网络延时敏感型应用。
 
 ## 快速开始
 
-快速搭建 Spiderpool，启动一个应用，可参考[快速搭建](./usage/install.md)。
+* 参考 [快速搭建](./usage/install/get-started-kind-zh_CN.md) 来使用 Spiderpool
 
-## IPAM 功能
+* 参考 [使用](./usage/readme-zh_CN.md) 来了解各种功能的使用方法
 
-* 对于有固定 IP 需求的应用，可以通过设置 IP 池有限的的 IP 地址集合和应用亲和性来支持。
-  可参考[例子](./usage/spider-subnet.md)。
+* 参考 [架构](./concepts/arch-zh_CN.md) 来了解架构设计
 
-    对于没有固定 IP 需求的应用，它们可以通过共享一个 IP 池，
-    可参考[例子](./usage/ippool-affinity-pod.md#shared-ippool)。
+## Roadmap
 
-* 对于 StatefulSet 应用，Spiderpool 支持自动为每一个 Pod 固定 IP 地址，也可控制应用所有 Pod 所使用的 IP 范围。
-  可参考[例子](./usage/statefulset.md)。
+| 功能                              | macvlan  | ipvlan | SR-IOV    |
+|----------------------------------|----------|--------|-----------|
+| Service By Kubeproxy             | Beta     |  Beta  | Beta      |
+| Service By Kubeproxy Replacement | Alpha    |  Alpha | Alpha     |
+| Network Policy                   | In-plan  |  Alpha | In-plan   |
+| Bandwidth                        | In-plan  | Alpha  | In-plan    |
+| RDMA                             | Alpha    | Alpha  | Alpha     |
+| IPAM                             | Beta     | Beta   | Beta      |
+| Multi-Cluster                    | Alpha    | Alpha  | Alpha     |
+| Egress Policy                    | Alpha    | Alpha  | Alpha     |
+| 多网卡和路由调谐                    | Beta     | Beta   | Beta      |
+| 适用场景                          | 裸金属    | 裸金属和虚拟机 | 裸金属 |
 
-* Subnet 功能，一方面，能够实现基础设施管理员和应用管理员的职责分离。
+关于所有的功能规划，具体可参考 [roadmap](./develop/roadmap.md)。
 
-    另一方面，能够为有固定 IP 需求的应用自动管理 IP 池，包括自动创建、扩缩容 IP、删除 固定 IP 池，
-    这能够减少大量的运维负担，可参考[例子](./usage/spider-subnet.md)。
-    该功能除了支持 K8S 原生的应用控制器，同时支持基于 operator 实现的第三方应用控制器。
-    可参考[例子](./usage/third-party-controller.md)。
+## Blogs
 
-* 对于一个跨子网部署的应用，支持为其不同副本分配不同子网的 IP 地址。
-  可参考[例子](./usage/ippool-affinity-node.md)。
+可参考 [Blog](./concepts/blog-zh_CN.md)。
 
-* 支持为 Pod 多网卡分配不同子网的 IP 地址，并帮助所有网卡之间协调策略路由，以确保请求向和回复向数据路径一致，避免丢包。
+## Governance
 
-    对于 Pod 具备多个 underlay CNI 网卡场景，可参考[例子](./usage/multi-interfaces-annotation.md)。
+Spiderpool 项目由一组[维护者和提交者](./AUTHORS)管理，我们的 [Governance Document](https://github.com/spidernet-io/community/blob/main/GOVERNANCE-maintainer.md) 概述了如何治理改项目。
 
-    对于 Pod 具备一个 overlay 网卡和多个 underlay CNI 网卡场景，
-    可参考[例子](./usage/install/overlay/get-started-calico.md)。
+## 使用者
 
-* 可以设置集群级别的默认 IP 池，也可租户级别的默认 IP 池。同时，IP 池既可以被整个集群共享，
-  也可被限定为被一个租户使用。可参考[例子](./usage/ippool-affinity-namespace.md)。
+使用 Spiderpool 项目的[用户](./USERS.md)。
 
-* 对于开源的 [Macvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/macvlan)、
-  [vlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/vlan)、
-  [ipvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/ipvlan)、
-  [SR-IOV CNI](https://github.com/k8snetworkplumbingwg/sriov-cni)、
-  [ovs CNI](https://github.com/k8snetworkplumbingwg/ovs-cni)等，
-  可帮助解决 ClusterIP 访问、Pod 宿主机健康检查等问题。
-  可参考[例子](./usage/get-started-macvlan.md)。
+## 参与开发
 
-  并且，能够帮助实施 IP 地址冲突检测、网关可达性检测，以保证 Pod 通信正常，可参考[例子](./usage/coodinator.md)。
+可参考[开发搭建文档](./develop/contributing.md)。
 
-* 基于节点拓扑的 IP 池功能，支持运行在裸金属[例子](./usage/install/underlay/get-started-cloud-zh_CN.md)、
-  vmware 虚拟机[例子](./usage/install/underlay/get-started-vmware-zh_CN.md)、
-  openstack 虚拟机[例子](./usage/install/underlay/get-started-openstack-zh_CN.md)、
-  公有云[例子](./usage/install/underlay/get-started-cloud-zh_CN.md)等场景。
+## 社区
 
-* 在 Pod 启动时，能够在宿主机上动态创建 BOND 接口和 VLAN 子接口，以帮助
-  [Macvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/macvlan)
-  和 [ipvlan CNI](https://github.com/containernetworking/plugins/tree/main/plugins/main/ipvlan)
-  准备 master 接口。可参考[例子](./usage/ifcacer.md)。
+Spiderpool 社区致力于营造一个开放和热情的环境，并通过多种方式与其他用户和开发人员互动。您可以访问我们的[社区网站](https://github.com/spidernet-io/community)了解更多信息。
 
-* 可以通过 IP 池和 Pod annotaiton 等多种方式定制自定义路由，可参考[例子](./usage/route.md)。
+* Slack：如果你想在 CNCF Slack 加入 Spiderpool 的频道，请先得到 CNCF Slack 的 **[邀请](https://slack.cncf.io/)**
+  然后加入 [#Spiderpool](https://cloud-native.slack.com/messages/spiderpool) 的频道。
 
-* 以最佳实践的 CNI 配置来便捷地生成 [Multus](https://github.com/k8snetworkplumbingwg/multus-cni)
-  NetworkAttachmentDefinition 实例，并且保证其正确的 JSON 格式来提高使用体验。
-  可参考[例子](./concepts/mulltus-zh_CN.md)。
+* 邮件：您可以查看 [MAINTAINERS.md](https://github.com/spidernet-io/spiderpool/blob/main/MAINTAINERS.md) 获取所有维护者的邮箱地址， 联系邮箱地址以报告任何问题。
 
-* 应用可设置多个 IP 池，实现 IP 资源的备用效果。可参考[例子](./usage/ippool-multi.md)。
+* 社区会议：欢迎加入到我们每个月1号举行的[社区会议](https://docs.google.com/document/d/1tpNzxRWOz9-jVd30xGS2n5X02uXQuvqJAdNZzwBLTmI/edit?usp=sharing)，可以在这里讨论任何有关 Spiderpool 的问题。
 
-* 设置全局的预留 IP，让 IPAM 不分配出这些 IP 地址，这样能避免与集群外部的已用 IP 冲突。
-  可参考[例子](./usage/reserved-ip.md)。
+* 微信群：您可以扫描微信二维码，加入到 Spiderpool 技术交流群与我们进一步交流。
 
-* 分配和释放 IP 地址的高效性能，可参考[报告](./usage/performance-zh_CH.md)。
-
-* 合理的 IP 回收机制设计，使得集群或应用在故障恢复过程中，能够及时分配到 IP 地址。可参考[例子](./usage/gc.md)。
-
-* 所有的功能都能够在 ipv4-only、ipv6-only、dual-stack 场景下工作。可参考[例子](./usage/ipv6.md)。
-
-* 支持 AMD64 和 ARM64
-
-* [指标](./concepts/metrics.md)
+![Wechat QR-Code](./images/wechat.png)
 
 ## License
 
-Spiderpool is licensed under the Apache License, Version 2.0. See [LICENSE](../LICENSE) for the full license text.
+Spiderpool is licensed under the Apache License, Version 2.0. See [LICENSE](./LICENSE) for the full license text.
+
+## Others
+
+Copyright The Spiderpool Authors
+
+We are a [Cloud Native Computing Foundation](https://www.cncf.io) [sandbox project](https://landscape.cncf.io/?item=runtime--cloud-native-network--spiderpool).
+
+The Linux Foundation® (TLF) has registered trademarks and uses trademarks. For a list of TLF trademarks, see [Trademark Usage](https://www.linuxfoundation.org/legal/trademark-usage).
 
 <p align="center">
-<img src="https://landscape.cncf.io/images/left-logo.svg" width="300"/>&nbsp;&nbsp;<img src="https://landscape.cncf.io/images/right-logo.svg" width="350"/>
+<img src="https://landscape.cncf.io/images/cncf-landscape-horizontal-color.svg" width="300"/>&nbsp
 <br/><br/>
-Spiderpool 丰富了 <a href="https://landscape.cncf.io/?selected=spiderpool">CNCF 云原生全景图</a>。
 </p>

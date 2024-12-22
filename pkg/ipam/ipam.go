@@ -10,6 +10,7 @@ import (
 	"github.com/spidernet-io/spiderpool/api/v1/agent/models"
 	"github.com/spidernet-io/spiderpool/pkg/constant"
 	"github.com/spidernet-io/spiderpool/pkg/ippoolmanager"
+	"github.com/spidernet-io/spiderpool/pkg/kubevirtmanager"
 	"github.com/spidernet-io/spiderpool/pkg/limiter"
 	"github.com/spidernet-io/spiderpool/pkg/lock"
 	"github.com/spidernet-io/spiderpool/pkg/namespacemanager"
@@ -24,6 +25,7 @@ import (
 type IPAM interface {
 	Allocate(ctx context.Context, addArgs *models.IpamAddArgs) (*models.IpamAddResponse, error)
 	Release(ctx context.Context, delArgs *models.IpamDelArgs) error
+	ReleaseIPs(ctx context.Context, delArgs *models.IpamBatchDelArgs) error
 	Start(ctx context.Context) error
 }
 
@@ -39,6 +41,7 @@ type ipam struct {
 	podManager      podmanager.PodManager
 	stsManager      statefulsetmanager.StatefulSetManager
 	subnetManager   subnetmanager.SubnetManager
+	kubevirtManager kubevirtmanager.KubevirtManager
 }
 
 func NewIPAM(
@@ -50,6 +53,7 @@ func NewIPAM(
 	podManager podmanager.PodManager,
 	stsManager statefulsetmanager.StatefulSetManager,
 	subnetManager subnetmanager.SubnetManager,
+	kubevirtManager kubevirtmanager.KubevirtManager,
 ) (IPAM, error) {
 	if ipPoolManager == nil {
 		return nil, fmt.Errorf("ippool manager %w", constant.ErrMissingRequiredParam)
@@ -72,6 +76,9 @@ func NewIPAM(
 	if config.EnableSpiderSubnet && subnetManager == nil {
 		return nil, fmt.Errorf("subnet manager %w", constant.ErrMissingRequiredParam)
 	}
+	if kubevirtManager == nil {
+		return nil, fmt.Errorf("kubevirt manager %w", constant.ErrMissingRequiredParam)
+	}
 
 	return &ipam{
 		config:          setDefaultsForIPAMConfig(config),
@@ -84,6 +91,7 @@ func NewIPAM(
 		podManager:      podManager,
 		stsManager:      stsManager,
 		subnetManager:   subnetManager,
+		kubevirtManager: kubevirtManager,
 	}, nil
 }
 

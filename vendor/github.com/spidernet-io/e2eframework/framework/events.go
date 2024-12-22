@@ -39,8 +39,6 @@ func (f *Framework) WaitExceptEventOccurred(ctx context.Context, eventKind, objN
 			}
 			f.Log("watch event object %v", event.Object)
 			switch event.Type {
-			case watch.Error:
-				return ErrEvent
 			case watch.Deleted:
 				return ErrResDel
 			default:
@@ -48,11 +46,27 @@ func (f *Framework) WaitExceptEventOccurred(ctx context.Context, eventKind, objN
 				if !ok {
 					return ErrGetObj
 				}
-				f.Log("Event occurred message is %v \n", event.Message)
+				f.Log("Event occurred message is %s/%v \n", event.Type, event.Message)
 				if strings.Contains(event.Message, message) {
 					return nil
 				}
 			}
 		}
 	}
+}
+
+func (f *Framework) GetEvents(ctx context.Context, eventKind, objName, objNamespace string) (*corev1.EventList, error) {
+	l := &client.ListOptions{
+		Raw: &metav1.ListOptions{
+			TypeMeta:      metav1.TypeMeta{Kind: eventKind},
+			FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.namespace=%s", objName, objNamespace),
+		},
+	}
+
+	events := &corev1.EventList{}
+	if err := f.KClient.List(ctx, events, l); err != nil {
+		return nil, err
+	}
+
+	return events, nil
 }

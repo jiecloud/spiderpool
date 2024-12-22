@@ -39,7 +39,7 @@ golangci-lint
 gofmt
 codeql
 gokart
-unitest
+unittest
 codecov
 openapi.yaml
 vXX.XX.XX
@@ -146,7 +146,6 @@ SPIDERPOOL_CLI_PORT
 SPIDERPOOL_UPDATE_CR_MAX_RETRIES
 SPIDERPOOL_WORKLOADENDPOINT_MAX_HISTORY_RECORDS
 SPIDERPOOL_IPPOOL_MAX_ALLOCATED_IPS
-SPIDERPOOL_GC_TERMINATING_POD_IP_ENABLED
 SPIDERPOOL_GC_DEFAULT_INTERVAL_DURATION
 kubernetes
 vlan
@@ -158,7 +157,6 @@ ovs
 kube-ovn
 subent
 roadmap
-Icarus9913
 iiiceoo
 excludeIPs
 replicaset
@@ -294,3 +292,5 @@ auto_pool_scale_max_duration_seconds
 auto_pool_scale_min_duration_seconds
 auto_pool_scale_latest_duration_seconds
 auto_pool_scale_duration_seconds_histogram
+SPIDERPOOL_GC_STATELESS_TERMINATING_POD_ON_READY_NODE_ENABLED
+SPIDERPOOL_GC_STATELESS_TERMINATING_POD_ON_NOT_READY_NODE_ENABLED

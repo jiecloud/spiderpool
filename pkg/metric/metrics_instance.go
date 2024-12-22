@@ -9,9 +9,10 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	api "go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/instrument"
 
 	"github.com/spidernet-io/spiderpool/pkg/lock"
+	"github.com/spidernet-io/spiderpool/pkg/podownercache"
+	"github.com/spidernet-io/spiderpool/pkg/rdmametrics"
 )
 
 const metricPrefix = "spiderpool_"
@@ -75,61 +76,61 @@ const (
 
 var (
 	// ipam allocation metrics in spiderpool-agent
-	IpamAllocationTotalCounts                   instrument.Int64Counter
-	IpamAllocationFailureCounts                 instrument.Int64Counter
-	IpamAllocationUpdateIPPoolConflictCounts    instrument.Int64Counter
-	IpamAllocationErrInternalCounts             instrument.Int64Counter
-	IpamAllocationErrNoAvailablePoolCounts      instrument.Int64Counter
-	IpamAllocationErrRetriesExhaustedCounts     instrument.Int64Counter
-	IpamAllocationErrIPUsedOutCounts            instrument.Int64Counter
+	IpamAllocationTotalCounts                   api.Int64Counter
+	IpamAllocationFailureCounts                 api.Int64Counter
+	IpamAllocationUpdateIPPoolConflictCounts    api.Int64Counter
+	IpamAllocationErrInternalCounts             api.Int64Counter
+	IpamAllocationErrNoAvailablePoolCounts      api.Int64Counter
+	IpamAllocationErrRetriesExhaustedCounts     api.Int64Counter
+	IpamAllocationErrIPUsedOutCounts            api.Int64Counter
 	ipamAllocationAverageDurationSeconds        = new(asyncFloat64Gauge)
 	ipamAllocationMaxDurationSeconds            = new(asyncFloat64Gauge)
 	ipamAllocationMinDurationSeconds            = new(asyncFloat64Gauge)
 	ipamAllocationLatestDurationSeconds         = new(asyncFloat64Gauge)
-	ipamAllocationDurationSecondsHistogram      instrument.Float64Histogram
+	ipamAllocationDurationSecondsHistogram      api.Float64Histogram
 	ipamAllocationAverageLimitDurationSeconds   = new(asyncFloat64Gauge)
 	ipamAllocationMaxLimitDurationSeconds       = new(asyncFloat64Gauge)
 	ipamAllocationMinLimitDurationSeconds       = new(asyncFloat64Gauge)
 	ipamAllocationLatestLimitDurationSeconds    = new(asyncFloat64Gauge)
-	ipamAllocationLimitDurationSecondsHistogram instrument.Float64Histogram
+	ipamAllocationLimitDurationSecondsHistogram api.Float64Histogram
 
 	// ipam release metrics in spiderpool-agent
-	IpamReleaseTotalCounts                   instrument.Int64Counter
-	IpamReleaseFailureCounts                 instrument.Int64Counter
-	IpamReleaseUpdateIPPoolConflictCounts    instrument.Int64Counter
-	IpamReleaseErrInternalCounts             instrument.Int64Counter
-	IpamReleaseErrRetriesExhaustedCounts     instrument.Int64Counter
+	IpamReleaseTotalCounts                   api.Int64Counter
+	IpamReleaseFailureCounts                 api.Int64Counter
+	IpamReleaseUpdateIPPoolConflictCounts    api.Int64Counter
+	IpamReleaseErrInternalCounts             api.Int64Counter
+	IpamReleaseErrRetriesExhaustedCounts     api.Int64Counter
 	ipamReleaseAverageDurationSeconds        = new(asyncFloat64Gauge)
 	ipamReleaseMaxDurationSeconds            = new(asyncFloat64Gauge)
 	ipamReleaseMinDurationSeconds            = new(asyncFloat64Gauge)
 	ipamReleaseLatestDurationSeconds         = new(asyncFloat64Gauge)
-	ipamReleaseDurationSecondsHistogram      instrument.Float64Histogram
+	ipamReleaseDurationSecondsHistogram      api.Float64Histogram
 	ipamReleaseAverageLimitDurationSeconds   = new(asyncFloat64Gauge)
 	ipamReleaseMaxLimitDurationSeconds       = new(asyncFloat64Gauge)
 	ipamReleaseMinLimitDurationSeconds       = new(asyncFloat64Gauge)
 	ipamReleaseLatestLimitDurationSeconds    = new(asyncFloat64Gauge)
-	ipamReleaseLimitDurationSecondsHistogram instrument.Float64Histogram
+	ipamReleaseLimitDurationSecondsHistogram api.Float64Histogram
 
 	// IP GC metrics in spiderpool-controller
-	IPGCTotalCounts   instrument.Int64Counter
-	IPGCFailureCounts instrument.Int64Counter
+	IPGCTotalCounts   api.Int64Counter
+	IPGCFailureCounts api.Int64Counter
 
 	// IPPool&Subnet metrics in spiderpool-controller
 	TotalIPPoolCounts       = new(asyncInt64Gauge)
-	IPPoolTotalIPCounts     instrument.Int64Counter
-	IPPoolAvailableIPCounts instrument.Int64Counter
+	IPPoolTotalIPCounts     api.Int64Counter
+	IPPoolAvailableIPCounts api.Int64Counter
 	TotalSubnetCounts       = new(asyncInt64Gauge)
 	SubnetPoolCounts        = new(asyncInt64Gauge)
-	SubnetTotalIPCounts     instrument.Int64Counter
-	SubnetAvailableIPCounts instrument.Int64Counter
+	SubnetTotalIPCounts     api.Int64Counter
+	SubnetAvailableIPCounts api.Int64Counter
 
 	// SpiderSubnet feature performance monitoring metric in spiderpool-agent
-	AutoPoolWaitedForAvailableCounts instrument.Int64Counter
+	AutoPoolWaitedForAvailableCounts api.Int64Counter
 )
 
 // asyncFloat64Gauge is custom otel float64 gauge
 type asyncFloat64Gauge struct {
-	gaugeMetric           instrument.Float64ObservableGauge
+	gaugeMetric           api.Float64ObservableGauge
 	observerValueToReport float64
 	observerAttrsToReport []attribute.KeyValue
 	observerLock          lock.RWMutex
@@ -151,7 +152,7 @@ func (a *asyncFloat64Gauge) initGauge(metricName string, description string, isD
 	_, err = m.RegisterCallback(func(_ context.Context, observer api.Observer) error {
 		observer.ObserveFloat64(a.gaugeMetric,
 			a.observerValueToReport,
-			a.observerAttrsToReport...,
+			api.WithAttributes(a.observerAttrsToReport...),
 		)
 		return nil
 	}, a.gaugeMetric)
@@ -175,7 +176,7 @@ func (a *asyncFloat64Gauge) Record(value float64, attrs ...attribute.KeyValue) {
 
 // asyncInt64Gauge is custom otel int64 gauge
 type asyncInt64Gauge struct {
-	gaugeMetric           instrument.Int64ObservableGauge
+	gaugeMetric           api.Int64ObservableGauge
 	observerValueToReport int64
 	observerAttrsToReport []attribute.KeyValue
 	observerLock          lock.RWMutex
@@ -197,7 +198,7 @@ func (a *asyncInt64Gauge) initGauge(metricName string, description string, isDeb
 	_, err = m.RegisterCallback(func(_ context.Context, observer api.Observer) error {
 		observer.ObserveInt64(a.gaugeMetric,
 			a.observerValueToReport,
-			a.observerAttrsToReport...,
+			api.WithAttributes(a.observerAttrsToReport...),
 		)
 		return nil
 	}, a.gaugeMetric)
@@ -220,7 +221,15 @@ func (a *asyncInt64Gauge) Record(value int64, attrs ...attribute.KeyValue) {
 }
 
 // InitSpiderpoolAgentMetrics serves for spiderpool agent metrics initialization
-func InitSpiderpoolAgentMetrics(ctx context.Context) error {
+func InitSpiderpoolAgentMetrics(ctx context.Context, cache podownercache.CacheInterface) error {
+	// for rdma
+	if cache != nil {
+		err := rdmametrics.Register(ctx, meter, cache)
+		if err != nil {
+			return err
+		}
+	}
+
 	err := initSpiderpoolAgentAllocationMetrics(ctx)
 	if nil != err {
 		return err

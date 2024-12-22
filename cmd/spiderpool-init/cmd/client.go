@@ -60,14 +60,9 @@ func (c *CoreClient) WaitForCoordinatorCreated(ctx context.Context, coord *spide
 			return nil
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			interval := retryIntervalSec * time.Second
-			logger.Sugar().Infof("Failed to create default Coordinator %s, recreate in %s: %v", coord.Name, interval, err)
-			time.Sleep(interval)
-		}
+		interval := retryIntervalSec * time.Second
+		logger.Sugar().Infof("Failed to create default Coordinator %s, recreate in %s: %v", coord.Name, interval, err)
+		time.Sleep(interval)
 	}
 }
 
@@ -86,14 +81,9 @@ func (c *CoreClient) WaitForSubnetCreated(ctx context.Context, subnet *spiderpoo
 			return nil
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			interval := retryIntervalSec * time.Second
-			logger.Sugar().Infof("Failed to create default IPv%d Subnet %s, recreate in %s: %v", *subnet.Spec.IPVersion, subnet.Name, interval, err)
-			time.Sleep(interval)
-		}
+		interval := retryIntervalSec * time.Second
+		logger.Sugar().Infof("Failed to create default IPv%d Subnet %s, recreate in %s: %v", *subnet.Spec.IPVersion, subnet.Name, interval, err)
+		time.Sleep(interval)
 	}
 }
 
@@ -101,21 +91,21 @@ func (c *CoreClient) WaitForIPPoolCreated(ctx context.Context, ipPool *spiderpoo
 	logger := logutils.FromContext(ctx)
 
 	for {
-		err := c.Create(ctx, ipPool)
-		if err == nil {
-			logger.Sugar().Infof("Succeed to create default IPv%d IPPool: %+v", *ipPool.Spec.IPVersion, *ipPool)
-			return nil
-		}
-
-		if apierrors.IsAlreadyExists(err) {
-			logger.Sugar().Infof("Default IPv%d IPPool %s is already exists, ignore creating", *ipPool.Spec.IPVersion, ipPool.Name)
-			return nil
-		}
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+			err := c.Create(ctx, ipPool)
+			if err == nil {
+				logger.Sugar().Infof("Succeed to create default IPv%d IPPool: %+v", *ipPool.Spec.IPVersion, *ipPool)
+				return nil
+			}
+
+			if apierrors.IsAlreadyExists(err) {
+				logger.Sugar().Infof("Default IPv%d IPPool %s is already exists, ignore creating", *ipPool.Spec.IPVersion, ipPool.Name)
+				return nil
+			}
+
 			interval := retryIntervalSec * time.Second
 			logger.Sugar().Infof("Failed to create default IPv%d IPPool %s, recreate in %s: %v", *ipPool.Spec.IPVersion, ipPool.Name, interval, err)
 			time.Sleep(interval)
@@ -131,14 +121,9 @@ func (c *CoreClient) WaitForEndpointReady(ctx context.Context, namespace, name s
 			return nil
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			interval := retryIntervalSec * time.Second
-			logger.Sugar().Infof("Spiderpool controller is not ready, recheck in %s", interval)
-			time.Sleep(interval)
-		}
+		interval := retryIntervalSec * time.Second
+		logger.Sugar().Infof("Spiderpool controller is not ready, recheck in %s", interval)
+		time.Sleep(interval)
 	}
 }
 
@@ -153,4 +138,58 @@ func (c *CoreClient) CheckEndpointsAvailable(ctx context.Context, namespace, nam
 	}
 
 	return false
+}
+
+func (c *CoreClient) WaitMultusCNIConfigCreated(ctx context.Context, multuscniconfig *spiderpoolv2beta1.SpiderMultusConfig) error {
+	logger := logutils.FromContext(ctx)
+
+	for {
+		err := c.Create(ctx, multuscniconfig)
+		if err == nil {
+			logger.Sugar().Infof("Succeed to create multuscniconfig %s/%s: %+v", multuscniconfig.Namespace, multuscniconfig.Name, multuscniconfig)
+			return nil
+		}
+
+		if apierrors.IsAlreadyExists(err) {
+			logger.Sugar().Infof("multuscniconfig %s/%s is already exists, ignore creating", multuscniconfig.Namespace, multuscniconfig.Name)
+			return nil
+		}
+
+		interval := retryIntervalSec * time.Second
+		logger.Sugar().Infof("Failed to create multuscniconfig %s/%s, recreate in %s: %v", multuscniconfig.Namespace, multuscniconfig.Name, interval, err)
+		time.Sleep(interval)
+	}
+}
+
+func (c *CoreClient) WaitPodListReady(ctx context.Context, namespace string, labels map[string]string) error {
+	logger := logutils.FromContext(ctx)
+	ticker := time.NewTicker(retryIntervalSec * time.Second)
+	defer ticker.Stop()
+
+	var podList corev1.PodList
+	for {
+		<-ticker.C
+		if err := c.List(ctx, &podList, client.MatchingLabels(labels), client.InNamespace(namespace)); err != nil {
+			logger.Sugar().Errorf("failed to get spiderAgent pods: %v, retrying...", err)
+			continue
+		}
+
+		if podList.Items == nil {
+			continue
+		}
+
+		ready := true
+		for _, pod := range podList.Items {
+			if pod.Status.Phase != corev1.PodRunning {
+				ready = false
+				break
+			}
+		}
+
+		if ready {
+			logger.Sugar().Infof("spiderpool-agent is ready")
+			return nil
+		}
+		logger.Sugar().Infof("spiderpool-agent is not ready, phase: %v, retrying in %vs", podList.Items[0].Status.Phase, retryIntervalSec)
+	}
 }

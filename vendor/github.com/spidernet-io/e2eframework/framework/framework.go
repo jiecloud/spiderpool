@@ -10,6 +10,7 @@ import (
 
 	"github.com/mohae/deepcopy"
 	batchv1 "k8s.io/api/batch/v1"
+	network_v1alpha1 "k8s.io/api/networking/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"strconv"
 
+	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensions_v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -179,11 +181,21 @@ func NewFramework(t TestingT, schemeRegisterList []func(*runtime.Scheme) error, 
 			return nil, fmt.Errorf("failed to add batchv1 Scheme")
 		}
 
+		err = network_v1alpha1.AddToScheme(scheme)
+		if err != nil {
+			return nil, fmt.Errorf("failed to add networking Scheme")
+		}
+
 		err = apiextensions_v1.AddToScheme(scheme)
 		if err != nil {
 			return nil, fmt.Errorf("failed to add apiextensions_v1 Scheme : %v", err)
 		}
 		// f.Client, err = client.New(f.kConfig, client.Options{Scheme: scheme})
+
+		err = nadv1.AddToScheme(scheme)
+		if err != nil {
+			return nil, fmt.Errorf("failed to add network_attachment_definition_v1 Scheme")
+		}
 
 		for n, v := range schemeRegisterList {
 			if err := v(scheme); err != nil {

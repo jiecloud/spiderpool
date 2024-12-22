@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/containernetworking/cni/pkg/types"
 	netv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -21,8 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/pointer"
-	"k8s.io/utils/strings/slices"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -260,20 +257,19 @@ func (mcc *MultusConfigController) syncHandler(ctx context.Context, multusConfig
 		return nil
 	}
 
-	isExist := true
-
 	// use the annotation specified name as the CNI configuration name if set
 	netAttachName := multusConfig.Name
 	if tmpName, ok := multusConfig.Annotations[constant.AnnoNetAttachConfName]; ok {
 		netAttachName = tmpName
 	}
 
+	isExist := true
 	netAttachDef := &netv1.NetworkAttachmentDefinition{}
 	err := mcc.client.Get(ctx, ktypes.NamespacedName{
 		Namespace: multusConfig.Namespace,
 		Name:      netAttachName,
 	}, netAttachDef)
-	if nil != err {
+	if err != nil {
 		if apierrors.IsNotFound(err) {
 			isExist = false
 		} else {
@@ -282,12 +278,12 @@ func (mcc *MultusConfigController) syncHandler(ctx context.Context, multusConfig
 	}
 
 	newNetAttachDef, err := generateNetAttachDef(netAttachName, multusConfig)
-	if nil != err {
+	if err != nil {
 		return fmt.Errorf("failed to generate net-attach-def, error: %w", err)
 	}
 
 	err = controllerutil.SetControllerReference(multusConfig, newNetAttachDef, mcc.client.Scheme())
-	if nil != err {
+	if err != nil {
 		return fmt.Errorf("failed to set net-attach-def %s owner reference with MultusConfig %s/%s, error: %w",
 			newNetAttachDef.Name, multusConfig.Namespace, multusConfig.Name, err)
 	}
@@ -344,10 +340,13 @@ func (mcc *MultusConfigController) syncHandler(ctx context.Context, multusConfig
 
 func generateNetAttachDef(netAttachName string, multusConf *spiderpoolv2beta1.SpiderMultusConfig) (*netv1.NetworkAttachmentDefinition, error) {
 	multusConfSpec := multusConf.Spec.DeepCopy()
+
 	anno := multusConf.Annotations
+	if anno == nil {
+		anno = make(map[string]string)
+	}
 
 	var plugins []interface{}
-
 	// with Kubernetes OpenAPI validation, multusConfSpec.EnableCoordinator must not be nil
 	hasCoordinator := *multusConfSpec.EnableCoordinator
 	if hasCoordinator {
@@ -356,71 +355,129 @@ func generateNetAttachDef(netAttachName string, multusConf *spiderpoolv2beta1.Sp
 		plugins = append(plugins, coordinatorCNIConf)
 	}
 
-	switch multusConfSpec.CniType {
-	case MacVlanType:
-		macvlanCNIConf := generateMacvlanCNIConf(*multusConfSpec)
+	for _, cf := range multusConfSpec.ChainCNIJsonData {
+		var plugin interface{}
+		if err := json.Unmarshal([]byte(cf), &plugin); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal chain cni config %s: %v", cf, err)
+		}
+		plugins = append(plugins, plugin)
+	}
+
+	disableIPAM := false
+	if multusConfSpec.DisableIPAM != nil && *multusConfSpec.DisableIPAM {
+		disableIPAM = true
+	}
+
+	// we'll use the default CNI version 0.3.1 if the annotation doesn't have it.
+	// the annotation custom CNI version is already validated by webhook.
+	cniVersion := cmd.CniVersion031
+	if customCNIVersion, ok := anno[constant.AnnoMultusConfigCNIVersion]; ok {
+		cniVersion = customCNIVersion
+	}
+
+	var confStr string
+	var err error
+	// with Kubernetes OpenAPI validation, multusConfSpec.CniType must not be nil and default to "custom"
+	switch *multusConfSpec.CniType {
+	case constant.MacvlanCNI:
+		macvlanCNIConf := generateMacvlanCNIConf(disableIPAM, *multusConfSpec)
 		// head insertion
 		plugins = append([]interface{}{macvlanCNIConf}, plugins...)
-		if multusConfSpec.MacvlanConfig.VlanID != nil && *multusConfSpec.MacvlanConfig.VlanID != 0 {
+		if (multusConfSpec.MacvlanConfig.VlanID != nil && *multusConfSpec.MacvlanConfig.VlanID != 0) ||
+			len(multusConfSpec.MacvlanConfig.Master) >= 2 {
 			// we need to set Subvlan as first at the CNI plugin chain
 			subVlanCNIConf := generateIfacer(multusConfSpec.MacvlanConfig.Master,
 				*multusConfSpec.MacvlanConfig.VlanID,
 				multusConfSpec.MacvlanConfig.Bond)
 			plugins = append([]interface{}{subVlanCNIConf}, plugins...)
 		}
-	case IpVlanType:
-		ipvlanCNIConf := generateIPvlanCNIConf(*multusConfSpec)
+		confStr, err = marshalCniConfig2String(netAttachName, cniVersion, plugins)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshalCniConfig2String: %w", err)
+		}
+
+	case constant.IPVlanCNI:
+		ipvlanCNIConf := generateIPvlanCNIConf(disableIPAM, *multusConfSpec)
 		// head insertion
 		plugins = append([]interface{}{ipvlanCNIConf}, plugins...)
-		if multusConfSpec.IPVlanConfig.VlanID != nil && *multusConfSpec.IPVlanConfig.VlanID != 0 {
+		if (multusConfSpec.IPVlanConfig.VlanID != nil && *multusConfSpec.IPVlanConfig.VlanID != 0) ||
+			len(multusConfSpec.IPVlanConfig.Master) >= 2 {
 			// we need to set Subvlan as first at the CNI plugin chain
 			subVlanCNIConf := generateIfacer(multusConfSpec.IPVlanConfig.Master,
 				*multusConfSpec.IPVlanConfig.VlanID,
 				multusConfSpec.IPVlanConfig.Bond)
 			plugins = append([]interface{}{subVlanCNIConf}, plugins...)
 		}
-	case SriovType:
+
+		confStr, err = marshalCniConfig2String(netAttachName, cniVersion, plugins)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshalCniConfig2String: %w", err)
+		}
+
+	case constant.SriovCNI:
 		// SRIOV special annotation
 		anno[constant.ResourceNameAnnot] = multusConfSpec.SriovConfig.ResourceName
 
-		sriovCNIConf := generateSriovCNIConf(*multusConfSpec)
+		if multusConfSpec.SriovConfig.EnableRdma {
+			rdmaconf := RdmaNetConf{
+				Type: "rdma",
+			}
+			plugins = append([]interface{}{rdmaconf}, plugins...)
+		}
+
+		sriovCNIConf := generateSriovCNIConf(disableIPAM, *multusConfSpec)
 		// head insertion
 		plugins = append([]interface{}{sriovCNIConf}, plugins...)
-	case CustomType:
 
-	default:
-		// It's impossible get into the default branch
-		return nil, fmt.Errorf("%w: unrecognized CNI type %s", constant.ErrWrongInput, multusConfSpec.CniType)
-	}
-
-	cniVersion, ok := anno[constant.AnnoMultusConfigCNIVersion]
-	if !ok {
-		// we'll use the default CNI version 0.3.1 if the annotation doesn't have it.
-		cniVersion = cmd.CniVersion031
-	} else {
-		if !slices.Contains(cmd.SupportCNIVersions, cniVersion) {
-			return nil, fmt.Errorf("%w: unsupported CNI version %s", constant.ErrWrongInput, cniVersion)
+		confStr, err = marshalCniConfig2String(netAttachName, cniVersion, plugins)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal sriov cniConfig to String: %w", err)
 		}
-	}
 
-	fmt.Printf("Length: %d, Cap: %d\n", len(plugins), cap(plugins))
+	case constant.IBSriovCNI:
+		// SRIOV special annotation
+		anno[constant.ResourceNameAnnot] = multusConfSpec.IbSriovConfig.ResourceName
 
-	var confStr string
-	if multusConfSpec.CniType != CustomType {
-		rawList := map[string]interface{}{
-			"name":       netAttachName,
-			"cniVersion": cniVersion,
-			"plugins":    plugins,
+		cniConf := generateIBSriovCNIConf(disableIPAM, *multusConfSpec)
+		// head insertion
+		plugins = append([]interface{}{cniConf}, plugins...)
+
+		confStr, err = marshalCniConfig2String(netAttachName, cniVersion, plugins)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal ib-sriov cniConfig to String: %w", err)
 		}
-		bytes, err := json.Marshal(rawList)
-		if nil != err {
-			return nil, err
+
+	case constant.IPoIBCNI:
+		cniConf := generateIpoibCNIConf(disableIPAM, *multusConfSpec)
+		// head insertion
+		plugins = append([]interface{}{cniConf}, plugins...)
+
+		confStr, err = marshalCniConfig2String(netAttachName, cniVersion, plugins)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal ipoib cniConfig to String: %w", err)
 		}
-		confStr = string(bytes)
-	} else {
+
+	case constant.OvsCNI:
+		ovsConf := generateOvsCNIConf(disableIPAM, multusConfSpec)
+		plugins = append([]interface{}{ovsConf}, plugins...)
+		confStr, err = marshalCniConfig2String(netAttachName, cniVersion, plugins)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal ovs cniConfig to String: %w", err)
+		}
+		if multusConfSpec.OvsConfig.DeviceID != "" {
+			anno[constant.ResourceNameAnnot] = fmt.Sprintf("%s/%s", constant.ResourceNameOvsCniValue, multusConfSpec.OvsConfig.BrName)
+		}
+
+	case constant.CustomCNI:
 		if multusConfSpec.CustomCNIConfig != nil && len(*multusConfSpec.CustomCNIConfig) > 0 {
+			if !json.Valid([]byte(*multusConfSpec.CustomCNIConfig)) {
+				return nil, fmt.Errorf("customCniConfig isn't a valid JSON encoding")
+			}
 			confStr = *multusConfSpec.CustomCNIConfig
 		}
+	default:
+		// It's impossible get into the default branch
+		return nil, fmt.Errorf("%w: unrecognized CNI type %s", constant.ErrWrongInput, *multusConfSpec.CniType)
 	}
 
 	netAttachDef := &netv1.NetworkAttachmentDefinition{
@@ -435,11 +492,10 @@ func generateNetAttachDef(netAttachName string, multusConf *spiderpoolv2beta1.Sp
 			Config: confStr,
 		}
 	}
-
 	return netAttachDef, nil
 }
 
-func generateMacvlanCNIConf(multusConfSpec spiderpoolv2beta1.MultusCNIConfigSpec) interface{} {
+func generateMacvlanCNIConf(disableIPAM bool, multusConfSpec spiderpoolv2beta1.MultusCNIConfigSpec) interface{} {
 	var masterName string
 
 	// choose interface basement name
@@ -456,26 +512,27 @@ func generateMacvlanCNIConf(multusConfSpec spiderpoolv2beta1.MultusCNIConfigSpec
 		}
 	}
 
-	// TODO(Icarus9913): customize the macvlan mode
 	netConf := MacvlanNetConf{
-		Type: string(MacVlanType),
-		IPAM: spiderpoolcmd.IPAMConfig{
-			Type: constant.Spiderpool,
-		},
+		Type:   constant.MacvlanCNI,
 		Master: masterName,
 		Mode:   "bridge",
 	}
 
-	// set default IPPools for spiderpool cni configuration
-	if multusConfSpec.MacvlanConfig.SpiderpoolConfigPools != nil {
-		netConf.IPAM.DefaultIPv4IPPool = multusConfSpec.MacvlanConfig.SpiderpoolConfigPools.IPv4IPPool
-		netConf.IPAM.DefaultIPv6IPPool = multusConfSpec.MacvlanConfig.SpiderpoolConfigPools.IPv6IPPool
+	if !disableIPAM {
+		netConf.IPAM = &spiderpoolcmd.IPAMConfig{
+			Type: constant.Spiderpool,
+		}
+		// set default IPPools for spiderpool cni configuration
+		if multusConfSpec.MacvlanConfig.SpiderpoolConfigPools != nil {
+			netConf.IPAM.DefaultIPv4IPPool = multusConfSpec.MacvlanConfig.SpiderpoolConfigPools.IPv4IPPool
+			netConf.IPAM.DefaultIPv6IPPool = multusConfSpec.MacvlanConfig.SpiderpoolConfigPools.IPv6IPPool
+		}
 	}
 
 	return netConf
 }
 
-func generateIPvlanCNIConf(multusConfSpec spiderpoolv2beta1.MultusCNIConfigSpec) interface{} {
+func generateIPvlanCNIConf(disableIPAM bool, multusConfSpec spiderpoolv2beta1.MultusCNIConfigSpec) interface{} {
 	var masterName string
 
 	// choose interface basement name
@@ -492,93 +549,177 @@ func generateIPvlanCNIConf(multusConfSpec spiderpoolv2beta1.MultusCNIConfigSpec)
 	}
 
 	netConf := IPvlanNetConf{
-		Type: string(IpVlanType),
-		IPAM: spiderpoolcmd.IPAMConfig{
-			Type: constant.Spiderpool,
-		},
+		Type:   constant.IPVlanCNI,
 		Master: masterName,
 	}
 
-	// set default IPPools for spiderpool cni configuration
-	if multusConfSpec.IPVlanConfig.SpiderpoolConfigPools != nil {
-		netConf.IPAM.DefaultIPv4IPPool = multusConfSpec.IPVlanConfig.SpiderpoolConfigPools.IPv4IPPool
-		netConf.IPAM.DefaultIPv6IPPool = multusConfSpec.IPVlanConfig.SpiderpoolConfigPools.IPv6IPPool
+	if !disableIPAM {
+		netConf.IPAM = &spiderpoolcmd.IPAMConfig{
+			Type: constant.Spiderpool,
+		}
+		// set default IPPools for spiderpool cni configuration
+		if multusConfSpec.IPVlanConfig.SpiderpoolConfigPools != nil {
+			netConf.IPAM.DefaultIPv4IPPool = multusConfSpec.IPVlanConfig.SpiderpoolConfigPools.IPv4IPPool
+			netConf.IPAM.DefaultIPv6IPPool = multusConfSpec.IPVlanConfig.SpiderpoolConfigPools.IPv6IPPool
+		}
 	}
 
 	return netConf
 }
 
-func generateSriovCNIConf(multusConfSpec spiderpoolv2beta1.MultusCNIConfigSpec) interface{} {
+func generateSriovCNIConf(disableIPAM bool, multusConfSpec spiderpoolv2beta1.MultusCNIConfigSpec) interface{} {
 	netConf := SRIOVNetConf{
-		Type: string(SriovType),
-		IPAM: spiderpoolcmd.IPAMConfig{
+		Type: constant.SriovCNI,
+	}
+
+	if !disableIPAM {
+		netConf.IPAM = &spiderpoolcmd.IPAMConfig{
 			Type: constant.Spiderpool,
-		},
+		}
+		// set default IPPools for spiderpool cni configuration
+		if multusConfSpec.SriovConfig.SpiderpoolConfigPools != nil {
+			netConf.IPAM.DefaultIPv4IPPool = multusConfSpec.SriovConfig.SpiderpoolConfigPools.IPv4IPPool
+			netConf.IPAM.DefaultIPv6IPPool = multusConfSpec.SriovConfig.SpiderpoolConfigPools.IPv6IPPool
+		}
 	}
 
 	if multusConfSpec.SriovConfig.VlanID != nil {
-		netConf.Vlan = pointer.Int(int(*multusConfSpec.SriovConfig.VlanID))
+		netConf.Vlan = multusConfSpec.SriovConfig.VlanID
 	}
 
-	// set default IPPools for spiderpool cni configuration
-	if multusConfSpec.SriovConfig.SpiderpoolConfigPools != nil {
-		netConf.IPAM.DefaultIPv4IPPool = multusConfSpec.SriovConfig.SpiderpoolConfigPools.IPv4IPPool
-		netConf.IPAM.DefaultIPv6IPPool = multusConfSpec.SriovConfig.SpiderpoolConfigPools.IPv6IPPool
+	if multusConfSpec.SriovConfig.MaxTxRateMbps != nil {
+		netConf.MaxTxRate = multusConfSpec.SriovConfig.MaxTxRateMbps
 	}
 
+	if multusConfSpec.SriovConfig.MinTxRateMbps != nil {
+		netConf.MinTxRate = multusConfSpec.SriovConfig.MinTxRateMbps
+	}
+
+	return netConf
+}
+
+func generateIBSriovCNIConf(disableIPAM bool, multusConfSpec spiderpoolv2beta1.MultusCNIConfigSpec) interface{} {
+	netConf := IBSRIOVNetConf{
+		Type: constant.IBSriovCNI,
+	}
+
+	if !disableIPAM {
+		netConf.IPAM = &spiderpoolcmd.IPAMConfig{
+			Type: constant.Spiderpool,
+		}
+		// set default IPPools for spiderpool cni configuration
+		if multusConfSpec.IbSriovConfig.SpiderpoolConfigPools != nil {
+			if multusConfSpec.IbSriovConfig.SpiderpoolConfigPools.IPv4IPPool != nil {
+				netConf.IPAM.DefaultIPv4IPPool = multusConfSpec.IbSriovConfig.SpiderpoolConfigPools.IPv4IPPool
+			}
+			if multusConfSpec.IbSriovConfig.SpiderpoolConfigPools.IPv6IPPool != nil {
+				netConf.IPAM.DefaultIPv6IPPool = multusConfSpec.IbSriovConfig.SpiderpoolConfigPools.IPv6IPPool
+			}
+		}
+	}
+
+	if multusConfSpec.IbSriovConfig.Pkey != nil {
+		netConf.Pkey = multusConfSpec.IbSriovConfig.Pkey
+	}
+
+	if multusConfSpec.IbSriovConfig.IbKubernetesEnabled != nil {
+		netConf.IBKubernetesEnabled = multusConfSpec.IbSriovConfig.IbKubernetesEnabled
+	}
+
+	if multusConfSpec.IbSriovConfig.LinkState != nil {
+		netConf.LinkState = multusConfSpec.IbSriovConfig.LinkState
+	}
+
+	if multusConfSpec.IbSriovConfig.RdmaIsolation != nil {
+		netConf.RdmaIsolation = multusConfSpec.IbSriovConfig.RdmaIsolation
+	}
+
+	return netConf
+}
+
+func generateIpoibCNIConf(disableIPAM bool, multusConfSpec spiderpoolv2beta1.MultusCNIConfigSpec) interface{} {
+	netConf := IPoIBNetConf{
+		Type:   constant.IPoIBCNI,
+		Master: multusConfSpec.IpoibConfig.Master,
+	}
+
+	if !disableIPAM {
+		netConf.IPAM = &spiderpoolcmd.IPAMConfig{
+			Type: constant.Spiderpool,
+		}
+		// set default IPPools for spiderpool cni configuration
+		if multusConfSpec.IpoibConfig.SpiderpoolConfigPools != nil {
+			netConf.IPAM.DefaultIPv4IPPool = multusConfSpec.IpoibConfig.SpiderpoolConfigPools.IPv4IPPool
+			netConf.IPAM.DefaultIPv6IPPool = multusConfSpec.IpoibConfig.SpiderpoolConfigPools.IPv6IPPool
+		}
+	}
+
+	return netConf
+
+}
+
+func generateOvsCNIConf(disableIPAM bool, multusConfSpec *spiderpoolv2beta1.MultusCNIConfigSpec) interface{} {
+	netConf := OvsNetConf{
+		Type: constant.OvsCNI,
+	}
+
+	if !disableIPAM {
+		netConf.IPAM = &spiderpoolcmd.IPAMConfig{
+			Type: constant.Spiderpool,
+		}
+		if multusConfSpec.OvsConfig.SpiderpoolConfigPools != nil {
+			netConf.IPAM.DefaultIPv4IPPool = multusConfSpec.OvsConfig.SpiderpoolConfigPools.IPv4IPPool
+			netConf.IPAM.DefaultIPv6IPPool = multusConfSpec.OvsConfig.SpiderpoolConfigPools.IPv6IPPool
+		}
+	}
+
+	if multusConfSpec.OvsConfig != nil {
+		if multusConfSpec.OvsConfig.VlanTag != nil {
+			netConf.Vlan = multusConfSpec.OvsConfig.VlanTag
+		}
+
+		if len(multusConfSpec.OvsConfig.Trunk) > 0 {
+			netConf.Trunk = multusConfSpec.OvsConfig.Trunk
+		}
+
+		netConf.BrName = multusConfSpec.OvsConfig.BrName
+		netConf.DeviceID = multusConfSpec.OvsConfig.DeviceID
+	}
 	return netConf
 }
 
 func generateIfacer(master []string, vlanID int32, bond *spiderpoolv2beta1.BondConfig) interface{} {
 	netConf := IfacerNetConf{
-		NetConf: types.NetConf{
-			Type: constant.Ifacer,
-		},
+		Type:       constant.Ifacer,
 		Interfaces: master,
 		VlanID:     int(vlanID),
 	}
 
 	if bond != nil {
-		netConf.Bond.Name = bond.Name
-		netConf.Bond.Mode = int(bond.Mode)
-
-		if bond.Options != nil {
-			netConf.Bond.Options = *bond.Options
-		}
+		netConf.Bond = bond
 	}
 
 	return netConf
 }
 
 func generateCoordinatorCNIConf(coordinatorSpec *spiderpoolv2beta1.CoordinatorSpec) interface{} {
-	coordinatorNetConf := coordinatorcmd.Config{
-		NetConf: types.NetConf{
-			Type: constant.Coordinator,
-		},
+	coordinatorNetConf := CoordinatorConfig{
+		Type: constant.Coordinator,
 	}
 
 	// coordinatorSpec could be nil, and we just need the coorinator CNI specified and use the default configuration
 	if coordinatorSpec != nil {
-		if coordinatorSpec.TuneMode != nil {
-			coordinatorNetConf.TuneMode = coordinatorcmd.Mode(*coordinatorSpec.TuneMode)
+		if coordinatorSpec.Mode != nil {
+			coordinatorNetConf.Mode = coordinatorcmd.Mode(*coordinatorSpec.Mode)
 		}
-		if len(coordinatorSpec.ExtraCIDR) != 0 {
-			coordinatorNetConf.ExtraCIDR = coordinatorSpec.ExtraCIDR
+		if len(coordinatorSpec.HijackCIDR) != 0 {
+			coordinatorNetConf.HijackCIDR = coordinatorSpec.HijackCIDR
 		}
 		if coordinatorSpec.PodMACPrefix != nil {
 			coordinatorNetConf.MacPrefix = *coordinatorSpec.PodMACPrefix
 		}
-		if coordinatorSpec.TunePodRoutes != nil {
-			coordinatorNetConf.TunePodRoutes = coordinatorSpec.TunePodRoutes
-		}
 		if coordinatorSpec.PodDefaultRouteNIC != nil {
 			coordinatorNetConf.PodDefaultRouteNIC = *coordinatorSpec.PodDefaultRouteNIC
-		}
-		if coordinatorSpec.HostRuleTable != nil {
-			coordinatorNetConf.HostRuleTable = pointer.Int64(int64(*coordinatorSpec.HostRuleTable))
-		}
-		if coordinatorSpec.HostRPFilter != nil {
-			coordinatorNetConf.RPFilter = int32(*coordinatorSpec.HostRPFilter)
 		}
 		if coordinatorSpec.DetectIPConflict != nil {
 			coordinatorNetConf.IPConflict = coordinatorSpec.DetectIPConflict
@@ -586,7 +727,36 @@ func generateCoordinatorCNIConf(coordinatorSpec *spiderpoolv2beta1.CoordinatorSp
 		if coordinatorSpec.DetectGateway != nil {
 			coordinatorNetConf.DetectGateway = coordinatorSpec.DetectGateway
 		}
+		if coordinatorSpec.VethLinkAddress != nil {
+			coordinatorNetConf.VethLinkAddress = *coordinatorSpec.VethLinkAddress
+		}
+		if coordinatorSpec.TunePodRoutes != nil {
+			coordinatorNetConf.TunePodRoutes = coordinatorSpec.TunePodRoutes
+		}
+		if len(coordinatorSpec.HijackCIDR) > 0 {
+			coordinatorNetConf.HijackCIDR = coordinatorSpec.HijackCIDR
+		}
+		if coordinatorSpec.TxQueueLen != nil {
+			coordinatorNetConf.TxQueueLen = coordinatorSpec.TxQueueLen
+		}
+		if coordinatorSpec.PodCIDRType != nil {
+			coordinatorNetConf.PodRPFilter = coordinatorSpec.PodRPFilter
+		}
 	}
 
 	return coordinatorNetConf
+}
+
+func marshalCniConfig2String(netAttachName, cniVersion string, plugins interface{}) (string, error) {
+	rawList := map[string]interface{}{
+		"name":       netAttachName,
+		"cniVersion": cniVersion,
+		"plugins":    plugins,
+	}
+	bytes, err := json.Marshal(rawList)
+	if err != nil {
+		return "", err
+	}
+
+	return string(bytes), nil
 }

@@ -1,11 +1,11 @@
 # Copyright 2022 Authors of spidernet-io
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BASE_IMAGE=ghcr.io/spidernet-io/spiderpool/spiderpool-base:1f8330482d25b58d2ae26bc6252e20384bac92ad
-ARG GOLANG_IMAGE=docker.io/library/golang:1.20@sha256:f69d47fedd3b2ebd23bcf473c0b78522ebbc1823f06b7d47f45f04a30bdc901d
+ARG BASE_IMAGE=ghcr.io/spidernet-io/spiderpool/spiderpool-base:163aca9e9d927363fa80aca7d9721b379671a790
+ARG GOLANG_IMAGE=docker.io/library/golang:1.23.3@sha256:73f06be4578c9987ce560087e2e2ea6485fb605e3910542cadd8fa09fc5f3e31
 
 #======= build bin ==========
-FROM --platform=${BUILDPLATFORM} ${GOLANG_IMAGE} as builder
+FROM --platform=${BUILDPLATFORM} ${GOLANG_IMAGE} AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -60,7 +60,7 @@ ARG VERSION
 ENV VERSION=${VERSION}
 
 RUN groupadd -f spidernet \
-    && echo ". /etc/profile.d/bash_completion.sh" >> /etc/bash.bashrc
+        && echo ". /etc/profile.d/bash_completion.sh" >> /etc/bash.bashrc
 
 COPY --from=builder /tmp/install/${TARGETOS}/${TARGETARCH}/bin/*   /usr/bin/
 COPY --from=builder /tmp/install/${TARGETOS}/${TARGETARCH}/bash-completion/*  /etc/bash_completion.d/

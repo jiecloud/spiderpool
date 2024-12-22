@@ -13,15 +13,7 @@ import (
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
-	"go.uber.org/zap"
 )
-
-var DefaultInterfacesToExclude = []string{
-	"docker.*", "cbr.*", "dummy.*",
-	"virbr.*", "lxcbr.*", "veth.*", "lo",
-	"cali.*", "tunl.*", "flannel.*", "kube-ipvs.*",
-	"cni.*", "vx-submariner", "cilium*",
-}
 
 // GetIPFamilyByResult return IPFamily by parse CNI Result
 func GetIPFamilyByResult(prevResult *current.Result) (int, error) {
@@ -89,35 +81,35 @@ func IPAddressByName(netns ns.NetNS, interfacenName string, ipFamily int) ([]net
 
 // IPAddressOnNode return all ip addresses on the node, filter by ipFamily
 // skipping any interfaces whose name matches any of the exclusion list regexes
-func IPAddressOnNode(logger *zap.Logger, ipFamily int) ([]netlink.Addr, error) {
+func GetAllIPAddress(ipFamily int, excludeInterface []string) ([]netlink.Addr, error) {
 	var err error
 	var excludeRegexp *regexp.Regexp
-	if excludeRegexp, err = regexp.Compile("(" + strings.Join(DefaultInterfacesToExclude, ")|(") + ")"); err != nil {
-		logger.Error(err.Error())
-		return nil, err
+
+	if excludeInterface != nil {
+		if excludeRegexp, err = regexp.Compile("(" + strings.Join(excludeInterface, ")|(") + ")"); err != nil {
+			return nil, err
+		}
 	}
 
 	links, err := netlink.LinkList()
 	if err != nil {
-		logger.Error(err.Error())
 		return nil, err
 	}
 
 	var allIPAddress []netlink.Addr
 	for idx := range links {
 		iLink := links[idx]
-		if excludeRegexp.MatchString(iLink.Attrs().Name) {
+
+		if excludeRegexp != nil && excludeRegexp.MatchString(iLink.Attrs().Name) {
 			continue
 		}
 
 		ipAddress, err := GetAddersByLink(iLink, ipFamily)
 		if err != nil {
-			logger.Error(err.Error())
 			return nil, err
 		}
 		allIPAddress = append(allIPAddress, ipAddress...)
 	}
-	logger.Debug("Get IPAddressOnNode", zap.Any("allIPAddress", allIPAddress))
 	return allIPAddress, nil
 }
 
@@ -182,6 +174,42 @@ func isInterfaceExist(iface string) (bool, error) {
 	}
 }
 
+func GetUPLinkList(netns ns.NetNS) ([]netlink.Link, error) {
+	var err error
+	var links []netlink.Link
+	if netns != nil {
+		if err := netns.Do(func(nn ns.NetNS) error {
+			links, err = netlink.LinkList()
+			return err
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	// only include devices in up|broadcast|multicast state
+	// include:
+	//   example: eth0/net1, flag: up|broadcast|multicast
+	// exclude:
+	//   lo, flags: up|loopback
+	//   tunl0: flags: 0
+	res := make([]netlink.Link, 0)
+	for _, link := range links {
+		if link.Attrs().Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		if link.Attrs().Flags&net.FlagBroadcast == 0 {
+			continue
+		}
+
+		if link.Attrs().Flags&net.FlagMulticast == 0 {
+			continue
+		}
+
+		res = append(res, link)
+	}
+	return res, nil
+}
 func LinkSetBondSlave(slave string, bond *netlink.Bond) error {
 	l, err := netlink.LinkByName(slave)
 	if err != nil {
@@ -192,6 +220,15 @@ func LinkSetBondSlave(slave string, bond *netlink.Bond) error {
 		return fmt.Errorf("failed to LinkSetBondSlave: %w", err)
 	}
 	return nil
+}
+
+func LinkSetTxqueueLen(iface string, txQueneLen int) error {
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		return err
+	}
+
+	return netlink.LinkSetTxQLen(link, txQueneLen)
 }
 
 func LinkAdd(link netlink.Link) error {
@@ -208,4 +245,18 @@ func linkAddAndSetUp(link netlink.Link) error {
 		return fmt.Errorf("failed to set %s up: %w", link.Attrs().Name, err)
 	}
 	return nil
+}
+
+// IPNetEqual returns true iff both IPNet are equal
+// Copyright Authors of vishvananda/netlink
+func IPNetEqual(ipn1 *net.IPNet, ipn2 *net.IPNet) bool {
+	if ipn1 == ipn2 {
+		return true
+	}
+	if ipn1 == nil || ipn2 == nil {
+		return false
+	}
+	m1, _ := ipn1.Mask.Size()
+	m2, _ := ipn2.Mask.Size()
+	return m1 == m2 && ipn1.IP.Equal(ipn2.IP)
 }

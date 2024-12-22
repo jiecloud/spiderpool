@@ -30,17 +30,15 @@ MODULE_NAME=$(cat ${PROJECT_ROOT}/go.mod | grep -e "module[[:space:]][^[:space:]
 
 SPDX_COPYRIGHT_HEADER="${PROJECT_ROOT}/tools/spdx-copyright-header.txt"
 LICENSE_FILE="${PROJECT_ROOT}/tools/boilerplate.go.txt"
-go_path="${PROJECT_ROOT}/_go"
 
 cleanup() {
-  rm -rf ${go_path}
   rm -f ${LICENSE_FILE}
 }
 trap "cleanup" EXIT SIGINT
 cleanup
 
+# generate license file
 touch ${LICENSE_FILE}
-
 while read -r line || [[ -n ${line} ]]
 do
     echo "// ${line}" >>${LICENSE_FILE}
@@ -48,24 +46,14 @@ done < ${SPDX_COPYRIGHT_HEADER}
 
 APIS_PKG="pkg/k8s/apis"
 OUTPUT_PKG="pkg/k8s/client"
-GROUPS_WITH_VERSIONS="spiderpool.spidernet.io:v2beta1"
 
-echo "change directory: ${PROJECT_ROOT}"
-cd "${PROJECT_ROOT}"
+source "${PROJECT_ROOT}/${CODEGEN_PKG}/kube_codegen.sh"
 
-go_pkg="${go_path}/src/github.com/spidernet-io/spiderpool"
-go_pkg_dir=$(dirname "${go_pkg}")
-mkdir -p "${go_pkg_dir}"
-
-if [[ ! -e "${go_pkg_dir}" || "$(readlink "${go_pkg_dir}")" != "${PROJECT_ROOT}" ]]; then
-  ln -snf "${PROJECT_ROOT}" "${go_pkg_dir}"
-fi
-export GOPATH="${go_path}"
-
-bash ${PROJECT_ROOT}/${CODEGEN_PKG}/generate-groups.sh "client,informer,lister" \
-  ${MODULE_NAME}/${OUTPUT_PKG} \
-  ${MODULE_NAME}/${APIS_PKG} \
-  ${GROUPS_WITH_VERSIONS} \
-  --go-header-file ${LICENSE_FILE}
+kube::codegen::gen_client\
+    --with-watch \
+    --output-dir "${PROJECT_ROOT}/${OUTPUT_PKG}" \
+    --output-pkg "${MODULE_NAME}/${OUTPUT_PKG}" \
+    --boilerplate ${LICENSE_FILE} \
+    "${PROJECT_ROOT}/${APIS_PKG}"
 
 rm -f ${LICENSE_FILE}

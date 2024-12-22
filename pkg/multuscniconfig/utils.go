@@ -28,40 +28,87 @@ import (
 
 	netv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
-	ifacercmd "github.com/spidernet-io/spiderpool/cmd/ifacer/cmd"
+	coordinatorcmd "github.com/spidernet-io/spiderpool/cmd/coordinator/cmd"
 	spiderpoolcmd "github.com/spidernet-io/spiderpool/cmd/spiderpool/cmd"
+	"github.com/spidernet-io/spiderpool/pkg/constant"
+	"github.com/spidernet-io/spiderpool/pkg/k8s/apis/spiderpool.spidernet.io/v2beta1"
 	spiderpoolv2beta1 "github.com/spidernet-io/spiderpool/pkg/k8s/apis/spiderpool.spidernet.io/v2beta1"
 )
 
-const (
-	MacVlanType spiderpoolv2beta1.CniType = "macvlan"
-	IpVlanType  spiderpoolv2beta1.CniType = "ipvlan"
-	SriovType   spiderpoolv2beta1.CniType = "sriov"
-	CustomType  spiderpoolv2beta1.CniType = "custom"
-)
-
 type MacvlanNetConf struct {
-	Type   string                   `json:"type"`
-	IPAM   spiderpoolcmd.IPAMConfig `json:"ipam"`
-	Master string                   `json:"master"`
-	Mode   string                   `json:"mode"`
+	Type   string                    `json:"type"`
+	Master string                    `json:"master"`
+	Mode   string                    `json:"mode"`
+	IPAM   *spiderpoolcmd.IPAMConfig `json:"ipam,omitempty"`
 }
 
 type IPvlanNetConf struct {
-	Type   string                   `json:"type"`
-	IPAM   spiderpoolcmd.IPAMConfig `json:"ipam"`
-	Master string                   `json:"master"`
+	Type   string                    `json:"type"`
+	Master string                    `json:"master"`
+	IPAM   *spiderpoolcmd.IPAMConfig `json:"ipam,omitempty"`
 }
 
 type SRIOVNetConf struct {
-	Type         string                   `json:"type"`
-	ResourceName string                   `json:"resourceName"` // required
-	IPAM         spiderpoolcmd.IPAMConfig `json:"ipam"`
-	Vlan         *int                     `json:"vlan,omitempty"`
-	DeviceID     string                   `json:"deviceID,omitempty"`
+	Vlan *int32 `json:"vlan,omitempty"`
+	// Mbps, 0 = disable rate limiting
+	MinTxRate *int `json:"minTxRate,omitempty"`
+	// Mbps, 0 = disable rate limiting
+	MaxTxRate *int                      `json:"maxTxRate,omitempty"`
+	Type      string                    `json:"type"`
+	DeviceID  string                    `json:"deviceID,omitempty"`
+	IPAM      *spiderpoolcmd.IPAMConfig `json:"ipam,omitempty"`
 }
 
-type IfacerNetConf = ifacercmd.Ifacer
+type IBSRIOVNetConf struct {
+	Type                string                    `json:"type"`
+	Pkey                *string                   `json:"pkey,omitempty"`
+	LinkState           *string                   `json:"link_state,omitempty"`
+	RdmaIsolation       *bool                     `json:"rdmaIsolation,omitempty"`
+	IBKubernetesEnabled *bool                     `json:"ibKubernetesEnabled,omitempty"`
+	IPAM                *spiderpoolcmd.IPAMConfig `json:"ipam,omitempty"`
+}
+
+type IPoIBNetConf struct {
+	Type   string                    `json:"type"`
+	Master string                    `json:"master,omitempty"`
+	IPAM   *spiderpoolcmd.IPAMConfig `json:"ipam,omitempty"`
+}
+
+type RdmaNetConf struct {
+	Type string `json:"type"`
+}
+
+type OvsNetConf struct {
+	Vlan     *int32                     `json:"vlan,omitempty"`
+	Type     string                     `json:"type"`
+	BrName   string                     `json:"bridge"`
+	DeviceID string                     `json:"deviceID,omitempty"`
+	IPAM     *spiderpoolcmd.IPAMConfig  `json:"ipam,omitempty"`
+	Trunk    []*spiderpoolv2beta1.Trunk `json:"trunk,omitempty"`
+}
+
+type IfacerNetConf struct {
+	VlanID     int                           `json:"vlanID,omitempty"`
+	Type       string                        `json:"type"`
+	Interfaces []string                      `json:"interfaces,omitempty"`
+	Bond       *spiderpoolv2beta1.BondConfig `json:"bond,omitempty"`
+}
+
+type CoordinatorConfig struct {
+	TxQueueLen         *int                `json:"txQueueLen,omitempty"`
+	IPConflict         *bool               `json:"detectIPConflict,omitempty"`
+	DetectGateway      *bool               `json:"detectGateway,omitempty"`
+	VethLinkAddress    string              `json:"vethLinkAddress,omitempty"`
+	TunePodRoutes      *bool               `json:"tunePodRoutes,omitempty"`
+	MacPrefix          string              `json:"podMACPrefix,omitempty"`
+	Mode               coordinatorcmd.Mode `json:"mode,omitempty"`
+	Type               string              `json:"type"`
+	PodDefaultRouteNIC string              `json:"podDefaultRouteNic,omitempty"`
+	PodRPFilter        *int                `json:"podRPFilter,omitempty" `
+	OverlayPodCIDR     []string            `json:"overlayPodCIDR,omitempty"`
+	ServiceCIDR        []string            `json:"serviceCIDR,omitempty"`
+	HijackCIDR         []string            `json:"hijackCIDR,omitempty"`
+}
 
 func ParsePodNetworkAnnotation(podNetworks, defaultNamespace string) ([]*netv1.NetworkSelectionElement, error) {
 	var networks []*netv1.NetworkSelectionElement
@@ -124,9 +171,9 @@ func ParsePodNetworkAnnotation(podNetworks, defaultNamespace string) ([]*netv1.N
 		}
 
 		// compatibility pre v3.2, will be removed in v4.0
-		//if n.DeprecatedInterfaceRequest != "" && n.InterfaceRequest == "" {
+		// if n.DeprecatedInterfaceRequest != "" && n.InterfaceRequest == "" {
 		//	n.InterfaceRequest = n.DeprecatedInterfaceRequest
-		//}
+		// }
 	}
 
 	return networks, nil
@@ -170,9 +217,54 @@ func ParsePodNetworkObjectName(podnetwork string) (string, string, string, error
 	for i := range allItems {
 		matched := compile.MatchString(allItems[i])
 		if !matched && len([]rune(allItems[i])) > 0 {
-			return "", "", "", fmt.Errorf(fmt.Sprintf("parsePodNetworkObjectName: Failed to parse: one or more items did not match comma-delimited format (must consist of lower case alphanumeric characters). Must start and end with an alphanumeric character), mismatch @ '%v'", allItems[i]))
+			return "", "", "", fmt.Errorf("parsePodNetworkObjectName: Failed to parse: one or more items did not match comma-delimited format (must consist of lower case alphanumeric characters). Must start and end with an alphanumeric character), mismatch @ '%v'", allItems[i])
 		}
 	}
 
 	return netNsName, networkName, netIfName, nil
+}
+
+// resourceName returns the appropriate resource name based on the CNI type and configuration
+// of the given SpiderMultusConfig.
+func ResourceName(smc *spiderpoolv2beta1.SpiderMultusConfig) string {
+	switch *smc.Spec.CniType {
+	case constant.MacvlanCNI:
+		// For Macvlan CNI, return RDMA resource name if RDMA is enabled
+		if smc.Spec.MacvlanConfig != nil && smc.Spec.MacvlanConfig.EnableRdma {
+			return smc.Spec.MacvlanConfig.RdmaResourceName
+		}
+	case constant.IPVlanCNI:
+		if smc.Spec.IPVlanConfig != nil && smc.Spec.IPVlanConfig.EnableRdma {
+			return smc.Spec.IPVlanConfig.RdmaResourceName
+		}
+	case constant.SriovCNI:
+		if smc.Spec.SriovConfig != nil {
+			return smc.Spec.SriovConfig.ResourceName
+		}
+	case constant.IBSriovCNI:
+		if smc.Spec.IbSriovConfig != nil {
+			return smc.Spec.IbSriovConfig.ResourceName
+		}
+	}
+	return ""
+}
+
+func ValidateRdmaResouce(enableRdma bool, name, namespace, rdmaResourceName string, ippools *v2beta1.SpiderpoolPools) error {
+	if !enableRdma {
+		return fmt.Errorf("spidermultusconfig %s/%s not enable RDMA", namespace, name)
+	}
+
+	if rdmaResourceName == "" {
+		return fmt.Errorf("rdmaResourceName can not empty for spidermultusconfig %s/%s", namespace, name)
+	}
+
+	if ippools == nil {
+		return fmt.Errorf("No any ippools configured for spidermultusconfig %s/%s", namespace, name)
+	}
+
+	if len(ippools.IPv4IPPool)+len(ippools.IPv6IPPool) == 0 {
+		return fmt.Errorf("No any ippools configured for spidermultusconfig %s/%s", namespace, name)
+	}
+
+	return nil
 }

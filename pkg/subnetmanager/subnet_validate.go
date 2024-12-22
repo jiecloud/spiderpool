@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	"github.com/spidernet-io/spiderpool/pkg/constant"
@@ -184,6 +185,9 @@ func (sw *SubnetWebhook) validateSubnetCIDR(ctx context.Context, subnet *spiderp
 			err.Error(),
 		)
 	}
+	if err := spiderpoolip.IsFormatCIDR(subnet.Spec.Subnet); err != nil {
+		return field.Invalid(subnetField, subnet.Spec.Subnet, err.Error())
+	}
 
 	subnetList := spiderpoolv2beta1.SpiderSubnetList{}
 	if err := sw.APIReader.List(ctx, &subnetList); err != nil {
@@ -192,8 +196,10 @@ func (sw *SubnetWebhook) validateSubnetCIDR(ctx context.Context, subnet *spiderp
 
 	for _, s := range subnetList.Items {
 		if *s.Spec.IPVersion == *subnet.Spec.IPVersion {
+			// since we met already exist Subnet resource, we just return the error to avoid the following taxing operations.
+			// the user can also use k8s 'errors.IsAlreadyExists' to get the right error type assertion.
 			if s.Name == subnet.Name {
-				return field.InternalError(subnetField, fmt.Errorf("subnet %s already exists", subnet.Name))
+				return field.InternalError(subnetField, fmt.Errorf("subnet %s %s", subnet.Name, metav1.StatusReasonAlreadyExists))
 			}
 
 			overlap, err := spiderpoolip.IsCIDROverlap(*subnet.Spec.IPVersion, subnet.Spec.Subnet, s.Spec.Subnet)
@@ -207,6 +213,48 @@ func (sw *SubnetWebhook) validateSubnetCIDR(ctx context.Context, subnet *spiderp
 					subnet.Spec.Subnet,
 					fmt.Sprintf("overlap with Subnet %s which 'spec.subnet' is %s", s.Name, s.Spec.Subnet),
 				)
+			}
+		}
+	}
+
+	return sw.validateOrphanIPPool(ctx, subnet)
+}
+
+// validateOrphanIPPool will check the SpiderSubnet.Spec.Subnet whether overlaps with the cluster orphan SpiderIPPool.Spec.Subnet.
+// And we also require the IPPool.Spec.IPs belong to Subnet.Spec.IPs if they are in the same subnet
+func (sw *SubnetWebhook) validateOrphanIPPool(ctx context.Context, subnet *spiderpoolv2beta1.SpiderSubnet) *field.Error {
+	poolList := spiderpoolv2beta1.SpiderIPPoolList{}
+	err := sw.APIReader.List(ctx, &poolList)
+	if nil != err {
+		return field.InternalError(subnetField, fmt.Errorf("failed to list IPPools: %v", err))
+	}
+
+	for _, tmpPool := range poolList.Items {
+		if *tmpPool.Spec.IPVersion != *subnet.Spec.IPVersion {
+			continue
+		}
+
+		// validate the Spec.Subnet whether overlaps or not
+		if tmpPool.Spec.Subnet != subnet.Spec.Subnet {
+			isCIDROverlap, err := spiderpoolip.IsCIDROverlap(*subnet.Spec.IPVersion, tmpPool.Spec.Subnet, subnet.Spec.Subnet)
+			if nil != err {
+				return field.InternalError(subnetField, fmt.Errorf("failed to compare whether 'spec.subnet' overlaps with SpiderIPPool '%s', error: %v", tmpPool.Name, err))
+			}
+			if isCIDROverlap {
+				return field.Invalid(subnetField, subnet.Spec.Subnet, fmt.Sprintf("overlap with SpiderIPPool '%s' resource 'spec.subnet' %s", tmpPool.Name, tmpPool.Spec.Subnet))
+			}
+		} else {
+			// validate the Spec.IPs whether contains or not
+			poolIPs, err := spiderpoolip.AssembleTotalIPs(*tmpPool.Spec.IPVersion, tmpPool.Spec.IPs, tmpPool.Spec.ExcludeIPs)
+			if nil != err {
+				return field.InternalError(ipsField, fmt.Errorf("failed to assemble the total IP addresses of the IPPool '%s', error: %v", tmpPool.Name, err))
+			}
+			subnetIPs, err := spiderpoolip.AssembleTotalIPs(*subnet.Spec.IPVersion, subnet.Spec.IPs, subnet.Spec.ExcludeIPs)
+			if nil != err {
+				return field.InternalError(ipsField, fmt.Errorf("failed to assemble the total IP addresses of the Subnet '%s', error: %v", subnet.Name, err))
+			}
+			if spiderpoolip.IsDiffIPSet(poolIPs, subnetIPs) {
+				return field.Invalid(ipsField, subnet.Spec.IPs, fmt.Sprintf("SpiderIPPool '%s' owns some IP addresses that SpiderSubnet '%s' can't control", tmpPool.Name, subnet.Name))
 			}
 		}
 	}

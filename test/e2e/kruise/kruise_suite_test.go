@@ -13,9 +13,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func TestSubnet(t *testing.T) {
+func TestThirdPartyControl(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Kruise Suite")
+	RunSpecs(t, "Test Third Party Control")
 }
 
 var frame *e2e.Framework

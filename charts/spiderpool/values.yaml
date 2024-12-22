@@ -5,7 +5,7 @@
 ## @section Global parameters
 ##
 global:
-  ## @param global.imageRegistryOverride Global Docker image registry
+  ## @param global.imageRegistryOverride Global image registry for all images, which is used for offline environment
   imageRegistryOverride: ""
 
   ## @param global.nameOverride instance name
@@ -23,14 +23,20 @@ global:
   #  label1: v1
   #  labele: v2
 
-  ## @param global.ipamBinHostPath the host path of the IPAM plugin directory.
-  ipamBinHostPath: /opt/cni/bin
+  ## @param global.cniBinHostPath the host path of the IPAM plugin directory.
+  cniBinHostPath: /opt/cni/bin
+
+  ## @param global.cniConfHostPath the host path of the cni config directory
+  cniConfHostPath: /etc/cni/net.d
 
   ## @param global.ipamUNIXSocketHostPath the host path of unix domain socket for ipam plugin
   ipamUNIXSocketHostPath: /var/run/spidernet/spiderpool.sock
 
   ## @param global.configName the configmap name
   configName: "spiderpool-conf"
+
+  ## @param global.ciliumConfigMap the cilium's configMap, default is kube-system/cilium-config
+  ciliumConfigMap: kube-system/cilium-config
 
 ## @section ipam parameters
 ##
@@ -44,11 +50,19 @@ ipam:
   ## @param ipam.enableStatefulSet the network mode
   enableStatefulSet: true
 
-  ## @param ipam.enableSpiderSubnet SpiderSubnet feature gate.
-  enableSpiderSubnet: false
+  ## @param ipam.enableKubevirtStaticIP the feature to keep kubevirt vm pod static IP
+  enableKubevirtStaticIP: true
 
-  ## @param ipam.subnetDefaultFlexibleIPNumber the default flexible IP number of SpiderSubnet feature auto-created IPPools
-  subnetDefaultFlexibleIPNumber: 1
+  spiderSubnet:
+    ## @param ipam.spiderSubnet.enable SpiderSubnet feature.
+    enable: true
+
+    autoPool:
+      ## @param ipam.spiderSubnet.autoPool.enable SpiderSubnet Auto IPPool feature.
+      enable: true
+
+      ## @param ipam.spiderSubnet.autoPool.defaultRedundantIPNumber the default redundant IP number of SpiderSubnet feature auto-created IPPools
+      defaultRedundantIPNumber: 1
 
   gc:
     ## @param ipam.gc.enabled enable retrieve IP in spiderippool CR
@@ -58,13 +72,18 @@ ipam:
       ## @param ipam.gc.gcAll.intervalInSecond the gc all interval duration
       intervalInSecond: 600
 
-    GcDeletingTimeOutPod:
-      ## @param ipam.gc.GcDeletingTimeOutPod.enabled enable retrieve IP for the pod who times out of deleting graceful period
-      enabled: true
+    statelessPod:
+      ## @param ipam.gc.statelessPod.zombieOnReadyNode enable reclaim IP for the stateless pod who is over deleting graceful period on a ready node
+      zombieOnReadyNode: true
 
-      ## @param ipam.gc.GcDeletingTimeOutPod.delay the gc delay seconds after the pod times out of deleting graceful period
-      delay: 0
+      ## @param ipam.gc.statelessPod.zombieOnNotReadyNode enable reclaim IP for the stateless pod who is over deleting graceful period on a not-ready node
+      zombieOnNotReadyNode: true
 
+    ## @param ipam.gc.gcDeletingTimeOutPodDelay the gc delay seconds after the pod times out of deleting graceful period
+    gcDeletingTimeOutPodDelay: 0
+
+## @section grafanaDashboard parameters
+##
 grafanaDashboard:
   ## @param grafanaDashboard.install install grafanaDashboard for spiderpool. This requires the grafana operator CRDs to be available
   install: false
@@ -87,20 +106,102 @@ coordinator:
   ## @param coordinator.name the name of the default SpiderCoordinator CR
   name: "default"
 
-  ## @param coordinator.tuneMode optional network mode, ["underlay", "overlay", "disabled"]
-  tuneMode: "underlay"
+  ## @param coordinator.mode optional network mode, ["auto","underlay", "overlay", "disabled"]
+  mode: "auto"
 
-  ## @param coordinator.podCIDRType Pod CIDR type that should be collected, [ "cluster", "calico", "cilium" ]
-  podCIDRType: "cluster"
+  ## @param coordinator.podCIDRType Pod CIDR type that should be collected, [ "auto", "cluster", "calico", "cilium", "none" ]
+  podCIDRType: "auto"
 
   ## @param coordinator.detectGateway detect the reachability of the gateway
-  detectGateway: true
+  detectGateway: false
 
   ## @param coordinator.detectIPConflict detect IP address conflicts
-  detectIPConflict: true
+  detectIPConflict: false
 
   ## @param coordinator.tunePodRoutes tune Pod routes
   tunePodRoutes: true
+
+  ## @param coordinator.hijackCIDR Additional subnets that need to be hijacked to the host forward, the default link-local range "169.254.0.0/16" is used for NodeLocal DNS
+  hijackCIDR: ["169.254.0.0/16"]
+
+  ## @param coordinator.vethLinkAddress configure an link-local address for veth0 device. empty means disable. default is empty. Format is like 169.254.100.1
+  vethLinkAddress: ""
+
+## @section rdma parameters
+##
+rdma:
+  rdmaSharedDevicePlugin:
+    ## @param rdma.rdmaSharedDevicePlugin.install install rdma shared device plugin for macvlan cni
+    install: false
+
+    ## @param rdma.rdmaSharedDevicePlugin.name the name of rdma shared device plugin
+    name: "spiderpool-rdma-shared-device-plugin"
+
+    image:
+      ## @param rdma.rdmaSharedDevicePlugin.image.registry the image registry of rdma shared device plugin
+      registry: ghcr.io
+
+      ## @param rdma.rdmaSharedDevicePlugin.image.repository the image repository of rdma shared device plugin
+      repository: mellanox/k8s-rdma-shared-dev-plugin
+
+      ## @param rdma.rdmaSharedDevicePlugin.image.pullPolicy the image pullPolicy of rdma shared device plugin
+      pullPolicy: IfNotPresent
+
+      ## @param rdma.rdmaSharedDevicePlugin.image.digest the image digest of rdma shared device plugin
+      digest: ""
+
+      ## @param rdma.rdmaSharedDevicePlugin.image.tag the image tag of rdma shared device plugin
+      tag: v1.5.1
+
+      ## @param rdma.rdmaSharedDevicePlugin.image.imagePullSecrets the image imagePullSecrets of rdma shared device plugin
+      imagePullSecrets: []
+      # - name: "image-pull-secret"
+
+    ## @skip rdma.rdmaSharedDevicePlugin.updateStrategy.rollingUpdate.maxUnavailable
+    ## @skip rdma.rdmaSharedDevicePlugin.updateStrategy.type
+    updateStrategy:
+      rollingUpdate:
+        maxUnavailable: 2
+      type: RollingUpdate
+
+    ## @skip rdma.rdmaSharedDevicePlugin.tolerations
+    tolerations:
+      - operator: Exists
+
+    ## @param rdma.rdmaSharedDevicePlugin.podAnnotations the additional annotations
+    podAnnotations: {}
+
+    ## @param rdma.rdmaSharedDevicePlugin.podLabels the additional label
+    podLabels: {}
+
+    resources:
+      limits:
+        ## @param rdma.rdmaSharedDevicePlugin.resources.limits.cpu the cpu limit
+        cpu: 300m
+        ## @param rdma.rdmaSharedDevicePlugin.resources.limits.memory the memory limit
+        memory: 300Mi
+      requests:
+        ## @param rdma.rdmaSharedDevicePlugin.resources.requests.cpu the cpu requests
+        cpu: 100m
+        ## @param rdma.rdmaSharedDevicePlugin.resources.requests.memory the memory requests
+        memory: 50Mi
+
+    deviceConfig:
+      ## @param rdma.rdmaSharedDevicePlugin.deviceConfig.periodicUpdateInterval periodic Update Interval
+      periodicUpdateInterval: 300
+
+      ## @param rdma.rdmaSharedDevicePlugin.deviceConfig.configList configure the network card for the rdma resource
+      configList: []
+        # [{
+        #  resourcePrefix: "spidernet.io",
+        #  resourceName: "hca_shared_devices",
+        #  rdmaHcaMax: 500,
+        #  selectors: {
+        #      "vendors": "15b3",
+        #      "deviceIDs": "1017",
+        #      "ifNames": ["enp11s0f0np0"]
+        #  }
+        # }]
 
 ## @section multus parameters
 ##
@@ -111,6 +212,9 @@ multus:
   multusCNI:
     ## @param multus.multusCNI.install enable install multus-CNI
     install: true
+
+    ## @param multus.multusCNI.uninstall enable remove multus-CNI configuration and binary files on multus-ds pod shutdown. Enable this if you uninstall multus from your cluster. Disable this in the multus upgrade phase to prevent CNI configuration file from being removed, which may cause pods start failure
+    uninstall: false
 
     ## @param multus.multusCNI.name the name of spiderpool multus
     name: "spiderpool-multus"
@@ -136,37 +240,8 @@ multus:
       imagePullSecrets: []
       # - name: "image-pull-secret"
 
-    ## @param multus.multusCNI.defaultCniCRName please create the related NetworkAttachmentDefinition for default CNI after installation, if this value is empty, multus will automatically get default CNI according to the existed CNI conf file in /etc/cni/net.d/
+    ## @param multus.multusCNI.defaultCniCRName if this value is empty, multus will automatically get default CNI according to the existed CNI conf file in /etc/cni/net.d/, if no cni files found in /etc/cni/net.d, A Spidermultusconfig CR named default will be created, please update the related SpiderMultusConfig for default CNI after installation. The namespace of defaultCniCRName follows with the release namespace of spdierpool
     defaultCniCRName: ""
-
-    resources:
-      limits:
-        ## @param multus.multusCNI.resources.limits.cpu the cpu limit of multus-CNI daemonset pod
-        cpu: 100m
-        ## @param multus.multusCNI.resources.limits.memory the memory limit of multus-CNI daemonset pod
-        memory: 50Mi
-      requests:
-        ## @param multus.multusCNI.resources.requests.cpu the cpu requests of multus-CNI daemonset pod
-        cpu: 100m
-        ## @param multus.multusCNI.resources.requests.memory the memory requests of multus-CNI daemonset pod
-        memory: 50Mi
-
-    ## @skip multus.multusCNI.tolerations
-    tolerations:
-      - operator: Exists
-
-    ## @param multus.multusCNI.podAnnotations the additional annotations of multus-CNI daemonset pod
-    podAnnotations: {}
-
-    ## @param multus.multusCNI.podLabels the additional label of multus-CNI daemonset pod
-    podLabels: {}
-
-    ## @skip multus.multusCNI.updateStrategy.rollingUpdate.maxUnavailable
-    ## @skip multus.multusCNI.updateStrategy.type
-    updateStrategy:
-      rollingUpdate:
-        maxUnavailable: 2
-      type: RollingUpdate
 
     securityContext:
       ## @param multus.multusCNI.securityContext.privileged the securityContext privileged of multus-CNI daemonset pod
@@ -191,6 +266,46 @@ multus:
 
       ## @param multus.multusCNI.log.logFile the multus-CNI daemonset pod log file
       logFile: "/var/log/multus.log"
+
+## @section plugins parameters
+##
+plugins:
+  ## @param plugins.installCNI install all cni plugins to each node
+  installCNI: false
+
+  ## @param plugins.installRdmaCNI install rdma cni used to isolate rdma device for sriov cni
+  installRdmaCNI: true
+
+  ## @param plugins.installOvsCNI install ovs cni to each node
+  installOvsCNI: true
+
+  ## @param plugins.installSriovCNI install sriov cni to each node
+  installSriovCNI: true
+
+  ## @param plugins.installibSriovCNI install ib-sriov cni to each node
+  installibSriovCNI: true
+
+  ## @param plugins.installIpoibCNI install ipoib cni to each node
+  installIpoibCNI: true
+
+  image:
+    ## @param plugins.image.registry the image registry of plugins
+    registry: ghcr.io
+
+    ## @param plugins.image.repository the image repository of plugins
+    repository: spidernet-io/spiderpool/spiderpool-plugins
+
+    ## @param plugins.image.pullPolicy the image pullPolicy of plugins
+    pullPolicy: IfNotPresent
+
+    ## @param plugins.image.digest the image digest of plugins
+    digest: ""
+
+    ## @param plugins.image.tag the image tag of plugins
+    tag: 82659d90cae0d6a5169eac2869e47c989932d775
+
+    ## @param plugins.image.imagePullSecrets the image imagePullSecrets of plugins
+    imagePullSecrets: []
 
 ## @section clusterDefaultPool parameters
 ##
@@ -323,6 +438,9 @@ spiderpoolAgent:
       ## @param spiderpoolAgent.resources.requests.memory the memory requests of spiderpoolAgent pod
       memory: 128Mi
 
+  ## @param spiderpoolAgent.tuneSysctlConfig enable to set required sysctl on each node to run spiderpool. refer to [Spiderpool-agent](https://spidernet-io.github.io/spiderpool/dev/reference/spiderpool-agent/) for details
+  tuneSysctlConfig: true
+
   ## @param spiderpoolAgent.securityContext the security Context of spiderpoolAgent pod
   securityContext: {}
   # runAsUser: 0
@@ -352,6 +470,9 @@ spiderpoolAgent:
   prometheus:
     ## @param spiderpoolAgent.prometheus.enabled enable spiderpool agent to collect metrics
     enabled: false
+
+    ## @param spiderpoolAgent.prometheus.enabledRdmaMetric enable spiderpool agent to collect RDMA metrics
+    enabledRdmaMetric: false
 
     ## @param spiderpoolAgent.prometheus.enabledDebugMetric enable spiderpool agent to collect debug level metrics
     enabledDebugMetric: false
@@ -544,6 +665,20 @@ spiderpoolController:
   ## @param spiderpoolController.webhookPort the http port for spiderpoolController webhook
   webhookPort: 5722
 
+  podResourceInject:
+    ## @param spiderpoolController.podResourceInject.enabled enable pod resource inject
+    enabled: false
+
+    ## @param spiderpoolController.podResourceInject.namespacesExclude exclude the namespaces of the pod resource inject
+    namespacesExclude:
+      - kube-system
+      - spiderpool
+      - metallb-system
+      - istio-system
+
+    ## @param spiderpoolController.podResourceInject.namespacesInclude include the namespaces of the pod resource inject, empty means all namespaces but exclude the namespaces in namespacesExclude, not empty means only include the namespaces in namespacesInclude
+    namespacesInclude: []
+
   prometheus:
     ## @param spiderpoolController.prometheus.enabled enable spiderpool Controller to collect metrics
     enabled: false
@@ -607,7 +742,7 @@ spiderpoolController:
     ## for certmanager method
     certmanager:
       ## @param spiderpoolController.tls.certmanager.certValidityDuration generated certificates validity duration in days for 'certmanager' method
-      certValidityDuration: 365
+      certValidityDuration: 36500
 
       ## @param spiderpoolController.tls.certmanager.issuerName issuer name of cert manager 'certmanager'. If not specified, a CA issuer will be created.
       issuerName: ""
@@ -643,6 +778,10 @@ spiderpoolController:
       ## @param spiderpoolController.tls.auto.extraDnsNames extra DNS names of server cert for auto method
       extraDnsNames: []
 
+  cleanup:
+    ## @param spiderpoolController.cleanup.enable clean up resources when helm uninstall
+    enable: true
+
 ## @section spiderpoolInit parameters
 ##
 spiderpoolInit:
@@ -651,9 +790,6 @@ spiderpoolInit:
 
   ## @param spiderpoolInit.binName the binName name of spiderpoolInit
   binName: "/usr/bin/spiderpool-init"
-
-  ## @param spiderpoolInit.hostnetwork enable hostnetwork mode of spiderpoolInit pod. Notice, if no CNI available before spiderpool installation, must enable this
-  hostnetwork: true
 
   image:
     ## @param spiderpoolInit.image.registry the image registry of spiderpoolInit
@@ -675,34 +811,8 @@ spiderpoolInit:
     imagePullSecrets: []
     # - name: "image-pull-secret"
 
-  ## @param spiderpoolInit.priorityClassName the priority Class Name for spiderpoolInit
-  priorityClassName: "system-node-critical"
-
-  ## @skip spiderpoolInit.tolerations
-  tolerations:
-    - operator: Exists
-
-  ## @skip spiderpoolInit.nodeSelector.kubernetes.io/os
-  nodeSelector:
-    kubernetes.io/os: linux
-
-  ## @param spiderpoolInit.affinity the affinity of spiderpoolInit
-  affinity: {}
-
   ## @param spiderpoolInit.extraArgs the additional arguments of spiderpoolInit container
   extraArgs: []
-
-  resources:
-    limits:
-      ## @param spiderpoolInit.resources.limits.cpu the cpu limit of spiderpoolInit pod
-      cpu: 200m
-      ## @param spiderpoolInit.resources.limits.memory the memory limit of spiderpoolInit pod
-      memory: 256Mi
-    requests:
-      ## @param spiderpoolInit.resources.requests.cpu the cpu requests of spiderpoolInit pod
-      cpu: 100m
-      ## @param spiderpoolInit.resources.requests.memory the memory requests of spiderpoolInit pod
-      memory: 128Mi
 
   ## @param spiderpoolInit.extraEnv the additional environment variables of spiderpoolInit container
   extraEnv: []
@@ -711,12 +821,223 @@ spiderpoolInit:
   securityContext: {}
   # runAsUser: 0
 
-  ## @param spiderpoolInit.podAnnotations the additional annotations of spiderpoolInit pod
-  podAnnotations: {}
-
-  ## @param spiderpoolInit.podLabels the additional label of spiderpoolInit pod
-  podLabels: {}
-
   serviceAccount:
     ## @param spiderpoolInit.serviceAccount.annotations the annotations of spiderpoolInit service account
     annotations: {}
+
+## @section sriov network operator parameters
+##
+sriov:
+  ## @param sriov.install install sriov network operator
+  install: false
+
+  ## @param sriov.name the name of sriov network operator
+  name: "spiderpool-sriov-operator"
+
+  ## @skip sriov.tolerations
+  tolerations:
+    - operator: Exists
+
+  ## @skip sriov.nodeSelector.kubernetes.io/os
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  ## @param sriov.affinity the affinity
+  affinity: {}
+
+  ## @param sriov.hostnetwork enable hostnetwork mode. Notice, if no CNI available before spiderpool installation, must enable this
+  hostnetwork: true
+
+  ## @param sriov.replicas the replicas number
+  replicas: 1
+
+  ## @param sriov.resourcePrefix the resource prefix
+  resourcePrefix: "spidernet.io"
+
+  ## @param sriov.priorityClassName the priority Class Name
+  priorityClassName: "system-node-critical"
+
+  resources:
+    limits:
+      ## @param sriov.resources.limits.cpu the cpu limit
+      cpu: 300m
+      ## @param sriov.resources.limits.memory the memory limit
+      memory: 300Mi
+    requests:
+      ## @param sriov.resources.requests.cpu the cpu requests
+      cpu: 100m
+      ## @param sriov.resources.requests.memory the memory requests
+      memory: 128Mi
+
+  operatorConfig:
+    ## @param sriov.operatorConfig.enableInjector Flag to control whether the network resource injector webhook shall be deployed
+    enableInjector: false
+
+    ## @param sriov.operatorConfig.enableOperatorWebhook Flag to control whether the operator admission controller webhook shall be deployed
+    enableOperatorWebhook: true
+
+    configDaemonNodeSelector:
+      ## @skip sriov.operatorConfig.configDaemonNodeSelector.configDaemonNodeSelector.kubernetes.io/os
+      ## @skip sriov.operatorConfig.configDaemonNodeSelector.kubernetes.io/os
+      kubernetes.io/os: "linux"
+
+    ## @param sriov.operatorConfig.logLevel Flag to control the log verbose level of the operator
+    logLevel: 2
+
+    ## @param sriov.operatorConfig.disableDrain Flag to disable nodes drain during debugging
+    disableDrain: true
+
+    ## @param sriov.operatorConfig.configurationMode Flag to enable the sriov-network-config-daemon to use a systemd service to configure SR-IOV devices on boot
+    configurationMode: daemon
+
+  image:
+    ## @param sriov.image.registry registry for all images
+    registry: ghcr.io
+
+    ## @param sriov.image.pullPolicy the image pullPolicy for all images
+    pullPolicy: IfNotPresent
+
+    ## @param sriov.image.imagePullSecrets the image imagePullSecrets for all images
+    imagePullSecrets: []
+    # - name: "image-pull-secret"
+
+    operator:
+      ## @param sriov.image.operator.repository the image repository
+      repository: spidernet-io/sriov-network-operator
+
+      ## @param sriov.image.operator.tag the image tag
+      tag: v1.3.0
+
+    sriovConfigDaemon:
+      ## @param sriov.image.sriovConfigDaemon.repository the image repository
+      repository: spidernet-io/sriov-network-operator-config-daemon
+
+      ## @param sriov.image.sriovConfigDaemon.tag the image tag
+      tag: v1.3.0
+
+    sriovDevicePlugin:
+      ## @param sriov.image.sriovDevicePlugin.repository the image repository
+      repository: k8snetworkplumbingwg/sriov-network-device-plugin
+
+      ## @param sriov.image.sriovDevicePlugin.tag the image tag
+      tag: v3.7.0
+
+    resourcesInjector:
+      ## @param sriov.image.resourcesInjector.repository the image repository
+      repository: k8snetworkplumbingwg/network-resources-injector
+
+      ## @param sriov.image.resourcesInjector.tag the image tag
+      tag: v1.6.0
+
+    webhook:
+      ## @param sriov.image.webhook.repository the image repository
+      repository: k8snetworkplumbingwg/sriov-network-operator-webhook
+
+      ## @param sriov.image.webhook.tag the image tag
+      tag: v1.3.0
+
+  ## TLS configuration for operator webhook
+  webhooktls:
+    ## @param sriov.webhooktls.method the method for generating TLS certificates. [ provided , certmanager , auto]
+    ## - provided:     provide all certificates by helm options
+    ## - certmanager:  This method use cert-manager to generate & rotate certificates.
+    ## - auto:         Auto generate cert.
+    method: auto
+
+    ## @param sriov.webhooktls.secretName the secret name for storing TLS certificates
+    secretName: "sriov-operator-webhook"
+
+    ## @param sriov.webhooktls.serviceName the service name of webhook. Do not modify this !!!
+    serviceName: "operator-webhook-service"
+
+    ## for certmanager method
+    certmanager:
+      ## @param sriov.webhooktls.certmanager.certValidityDuration generated certificates validity duration in days for 'certmanager' method
+      certValidityDuration: 365
+
+      ## @param sriov.webhooktls.certmanager.issuerName issuer name of cert manager 'certmanager'. If not specified, a CA issuer will be created.
+      issuerName: ""
+
+      ## @param sriov.webhooktls.certmanager.extraDnsNames extra DNS names added to certificate when it's auto generated
+      extraDnsNames: []
+
+      ## @param sriov.webhooktls.certmanager.extraIPAddresses extra IP addresses added to certificate when it's auto generated
+      extraIPAddresses: []
+
+    ## for provided method
+    provided:
+      ## @param sriov.webhooktls.provided.tlsCert encoded tls certificate for provided method
+      ## @param sriov.webhooktls.provided.tlsKey encoded tls key for provided method
+      ## @param sriov.webhooktls.provided.tlsCa encoded tls CA for provided method
+      tlsCert: ""
+      tlsKey: ""
+      tlsCa: ""
+
+    ## for auto method
+    auto:
+      ## @param sriov.webhooktls.auto.caExpiration ca expiration for auto method
+      # in day , default 200 years
+      caExpiration: '73000'
+
+      ## @param sriov.webhooktls.auto.certExpiration server cert expiration for auto method
+      # in day, default 200 years
+      certExpiration: '73000'
+
+      ## @param sriov.webhooktls.auto.extraIpAddresses extra IP addresses of server certificate for auto method
+      extraIpAddresses: []
+
+      ## @param sriov.webhooktls.auto.extraDnsNames extra DNS names of server cert for auto method
+      extraDnsNames: []
+
+  ## TLS configuration for injector webhook
+  injectortls:
+    ## @param sriov.injectortls.method the method for generating TLS certificates. [ provided , certmanager , auto]
+    ## - provided:     provide all certificates by helm options
+    ## - certmanager:  This method use cert-manager to generate & rotate certificates.
+    ## - auto:         Auto generate cert.
+    method: auto
+
+    ## @param sriov.injectortls.secretName the secret name for storing TLS certificates
+    secretName: "sriov-injector"
+
+    ## @param sriov.injectortls.serviceName the service name of webhook. Do not modify this !!!
+    serviceName: "network-resources-injector-service"
+
+    ## for certmanager method
+    certmanager:
+      ## @param sriov.injectortls.certmanager.certValidityDuration generated certificates validity duration in days for 'certmanager' method
+      certValidityDuration: 36500
+
+      ## @param sriov.injectortls.certmanager.issuerName issuer name of cert manager 'certmanager'. If not specified, a CA issuer will be created.
+      issuerName: ""
+
+      ## @param sriov.injectortls.certmanager.extraDnsNames extra DNS names added to certificate when it's auto generated
+      extraDnsNames: []
+
+      ## @param sriov.injectortls.certmanager.extraIPAddresses extra IP addresses added to certificate when it's auto generated
+      extraIPAddresses: []
+
+    ## for provided method
+    provided:
+      ## @param sriov.injectortls.provided.tlsCert encoded tls certificate for provided method
+      ## @param sriov.injectortls.provided.tlsKey encoded tls key for provided method
+      ## @param sriov.injectortls.provided.tlsCa encoded tls CA for provided method
+      tlsCert: ""
+      tlsKey: ""
+      tlsCa: ""
+
+    ## for auto method
+    auto:
+      ## @param sriov.injectortls.auto.caExpiration ca expiration for auto method
+      # in day , default 200 years
+      caExpiration: '73000'
+
+      ## @param sriov.injectortls.auto.certExpiration server cert expiration for auto method
+      # in day, default 200 years
+      certExpiration: '73000'
+
+      ## @param sriov.injectortls.auto.extraIpAddresses extra IP addresses of server certificate for auto method
+      extraIpAddresses: []
+
+      ## @param sriov.injectortls.auto.extraDnsNames extra DNS names of server cert for auto method
+      extraDnsNames: []

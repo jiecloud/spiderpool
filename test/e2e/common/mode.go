@@ -11,7 +11,9 @@ import (
 const (
 	ENV_INSTALL_OVERLAY          = "INSTALL_OVERLAY_CNI"
 	E2E_SPIDERPOOL_ENABLE_SUBNET = "E2E_SPIDERPOOL_ENABLE_SUBNET"
+	INSTALL_CALICO               = "INSTALL_CALICO"
 	INSTALL_CILIUM               = "INSTALL_CILIUM"
+	ENABLE_DRA                   = "E2E_SPIDERPOOL_ENABLE_DRA"
 )
 
 func checkBoolEnv(name string) bool {
@@ -27,8 +29,16 @@ func CheckRunOverlayCNI() bool {
 	return checkBoolEnv(ENV_INSTALL_OVERLAY)
 }
 
+func IsDRAEnabled() bool {
+	return checkBoolEnv(ENABLE_DRA)
+}
+
 func CheckSubnetFeatureOn() bool {
 	return checkBoolEnv(E2E_SPIDERPOOL_ENABLE_SUBNET)
+}
+
+func CheckCalicoFeatureOn() bool {
+	return checkBoolEnv(INSTALL_CALICO)
 }
 
 func CheckCiliumFeatureOn() bool {

@@ -28,7 +28,7 @@ var endpointManager workloadendpointmanager.WorkloadEndpointManager
 
 func TestWorkloadEndpointManager(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "WorkloadEndpointManager Suite", Label("workloadendpointmanager", "unitest"))
+	RunSpecs(t, "WorkloadEndpointManager Suite", Label("workloadendpointmanager", "unittest"))
 }
 
 var _ = BeforeSuite(func() {
@@ -60,6 +60,8 @@ var _ = BeforeSuite(func() {
 	endpointManager, err = workloadendpointmanager.NewWorkloadEndpointManager(
 		fakeClient,
 		fakeAPIReader,
+		true,
+		true,
 	)
 	Expect(err).NotTo(HaveOccurred())
 })

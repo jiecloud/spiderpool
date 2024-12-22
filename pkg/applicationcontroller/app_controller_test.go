@@ -22,7 +22,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/spidernet-io/spiderpool/pkg/applicationcontroller/applicationinformers"
@@ -49,7 +49,7 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 				UID:       types.UID("123"),
 			},
 			Spec: appsv1.DeploymentSpec{
-				Replicas: pointer.Int32(1),
+				Replicas: ptr.To(int32(1)),
 				Template: v1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -71,7 +71,7 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 				UID:       types.UID("123"),
 			},
 			Spec: appsv1.ReplicaSetSpec{
-				Replicas: pointer.Int32(1),
+				Replicas: ptr.To(int32(1)),
 				Template: v1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -114,7 +114,7 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 				UID:       types.UID("123"),
 			},
 			Spec: appsv1.StatefulSetSpec{
-				Replicas: pointer.Int32(1),
+				Replicas: ptr.To(int32(1)),
 				Template: v1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -508,7 +508,7 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 
 			It("change deployment replicas with spider subnet annotation", func() {
 				deployment2 := deployment1.DeepCopy()
-				deployment2.Spec.Replicas = pointer.Int32(2)
+				deployment2.Spec.Replicas = ptr.To(int32(2))
 				err := reconcileFunc(ctx, deployment1, deployment2)
 				Expect(err).NotTo(HaveOccurred())
 			})
@@ -548,7 +548,7 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 
 			It("change replicaSet replicas with spider subnet annotation", func() {
 				replicaSet2 := replicaSet1.DeepCopy()
-				replicaSet2.Spec.Replicas = pointer.Int32(2)
+				replicaSet2.Spec.Replicas = ptr.To(int32(2))
 				err := reconcileFunc(ctx, replicaSet1, replicaSet2)
 				Expect(err).NotTo(HaveOccurred())
 			})
@@ -560,8 +560,15 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 				Expect(err).NotTo(HaveOccurred())
 			})
 
-			It("the replicaSet has owner", func() {
+			It("the replicaSet has third-party controller owner", func() {
 				err := controllerutil.SetControllerReference(cloneSet, replicaSet1, scheme)
+				Expect(err).NotTo(HaveOccurred())
+				err = reconcileFunc(ctx, nil, replicaSet1)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("the replicaSet has deployment controller owner", func() {
+				err := controllerutil.SetControllerReference(deployment1, replicaSet1, scheme)
 				Expect(err).NotTo(HaveOccurred())
 				err = reconcileFunc(ctx, nil, replicaSet1)
 				Expect(err).NotTo(HaveOccurred())
@@ -628,7 +635,7 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 
 			It("change statefulset replicas with spider subnet annotation", func() {
 				statefulSet2 := statefulSet1.DeepCopy()
-				statefulSet2.Spec.Replicas = pointer.Int32(2)
+				statefulSet2.Spec.Replicas = ptr.To(int32(2))
 				err := reconcileFunc(ctx, statefulSet1, statefulSet2)
 				Expect(err).NotTo(HaveOccurred())
 			})
@@ -668,7 +675,7 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 
 			It("change job replicas with spider subnet annotation", func() {
 				job2 := job1.DeepCopy()
-				job2.Spec.Parallelism = pointer.Int32(2)
+				job2.Spec.Parallelism = ptr.To(int32(2))
 				err := reconcileFunc(ctx, job1, job2)
 				Expect(err).NotTo(HaveOccurred())
 			})
@@ -680,8 +687,15 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 				Expect(err).NotTo(HaveOccurred())
 			})
 
-			It("the job has owner", func() {
+			It("the job has third-party controller owner", func() {
 				err := controllerutil.SetControllerReference(cloneSet, job1, scheme)
+				Expect(err).NotTo(HaveOccurred())
+				err = reconcileFunc(ctx, nil, job1)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("the job has cronJob controller owner", func() {
+				err := controllerutil.SetControllerReference(cronJob1, job1, scheme)
 				Expect(err).NotTo(HaveOccurred())
 				err = reconcileFunc(ctx, nil, job1)
 				Expect(err).NotTo(HaveOccurred())
@@ -708,7 +722,7 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 
 			It("change cronJob replicas with spider subnet annotation", func() {
 				cronJob2 := cronJob1.DeepCopy()
-				cronJob2.Spec.JobTemplate.Spec.Parallelism = pointer.Int32(3)
+				cronJob2.Spec.JobTemplate.Spec.Parallelism = ptr.To(int32(3))
 				err := reconcileFunc(ctx, cronJob1, cronJob2)
 				Expect(err).NotTo(HaveOccurred())
 			})
@@ -728,6 +742,12 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 			})
 		})
 
+		Context("unrecognized controller", func() {
+			It("do not support third-party controller", func() {
+				err := reconcileFunc(ctx, nil, cloneSet)
+				Expect(err).To(HaveOccurred())
+			})
+		})
 	})
 
 	Describe("test application delete event hook handler", func() {
@@ -828,6 +848,12 @@ var _ = Describe("AppController", Label("app_controller_test"), func() {
 			})
 		})
 
+		Context("unrecognized controller", func() {
+			It("do not support third-party controller", func() {
+				err := cleanupFunc(ctx, cloneSet)
+				Expect(err).To(HaveOccurred())
+			})
+		})
 	})
 
 	Describe("test deleteAutoPools", func() {

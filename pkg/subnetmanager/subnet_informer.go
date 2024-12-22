@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	otelapi "go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -218,6 +219,7 @@ func (sc *SubnetController) enqueueSubnetOnUpdate(oldObj, newObj interface{}) {
 	logger.Debug(messageEnqueueSubnet)
 }
 
+// enqueueSubnetOnIPPoolChange receives the IPPool resources events
 func (sc *SubnetController) enqueueSubnetOnIPPoolChange(obj interface{}) {
 	ipPool := obj.(*spiderpoolv2beta1.SpiderIPPool)
 	ownerSubnet, ok := ipPool.Labels[constant.LabelIPPoolOwnerSpiderSubnet]
@@ -373,17 +375,18 @@ func (sc *SubnetController) syncHandler(ctx context.Context, subnetName string) 
 
 	if subnetCopy.Status.TotalIPCount != nil {
 		attr := attribute.String(constant.KindSpiderSubnet, subnetName)
-		metric.SubnetTotalIPCounts.Add(ctx, *subnetCopy.Status.TotalIPCount, attr)
+		metric.SubnetTotalIPCounts.Add(ctx, *subnetCopy.Status.TotalIPCount, otelapi.WithAttributes(attr))
 		if subnetCopy.Status.AllocatedIPCount != nil {
-			metric.SubnetAvailableIPCounts.Add(ctx, (*subnetCopy.Status.TotalIPCount)-(*subnetCopy.Status.AllocatedIPCount), attr)
+			metric.SubnetAvailableIPCounts.Add(ctx, (*subnetCopy.Status.TotalIPCount)-(*subnetCopy.Status.AllocatedIPCount), otelapi.WithAttributes(attr))
 		} else {
-			metric.SubnetAvailableIPCounts.Add(ctx, *subnetCopy.Status.TotalIPCount, attr)
+			metric.SubnetAvailableIPCounts.Add(ctx, *subnetCopy.Status.TotalIPCount, otelapi.WithAttributes(attr))
 		}
 	}
 
 	return nil
 }
 
+// syncMetadata add "ipam.spidernet.io/subnet-cidr" label for the SpiderSubnet object
 func (sc *SubnetController) syncMetadata(ctx context.Context, subnet *spiderpoolv2beta1.SpiderSubnet) error {
 	cidr, err := spiderpoolip.CIDRToLabelValue(*subnet.Spec.IPVersion, subnet.Spec.Subnet)
 	if err != nil {
@@ -406,6 +409,7 @@ func (sc *SubnetController) syncMetadata(ctx context.Context, subnet *spiderpool
 	return nil
 }
 
+// syncControllerSubnet would set ownerReference and add "ipam.spidernet.io/owner-spider-subnet" label for the previous orphan IPPool
 func (sc *SubnetController) syncControllerSubnet(ctx context.Context, subnet *spiderpoolv2beta1.SpiderSubnet) error {
 	ipPools, err := sc.IPPoolsLister.List(labels.Everything())
 	if err != nil {
@@ -435,6 +439,7 @@ func (sc *SubnetController) syncControllerSubnet(ctx context.Context, subnet *sp
 		}
 
 		if orphan {
+			ippoolmanager.InheritSubnetProperties(subnet, poolCopy)
 			if err := sc.Client.Update(ctx, poolCopy); err != nil {
 				return err
 			}
@@ -481,7 +486,7 @@ func (sc *SubnetController) syncControlledIPPoolIPs(ctx context.Context, subnet 
 			} else {
 				_, err := sc.IPPoolsLister.Get(poolName)
 				if apierrors.IsNotFound(err) {
-					logger.Sugar().Infof("The Application %v corresponding to the auto-created IPPool %s no longer exists, remove the pre-allocation from Subnet", appNamespacedName, poolName)
+					logger.Sugar().Infof("The Application %v corresponding to the auto-created Subnet %s no longer exists, remove the pre-allocation from CIDR", appNamespacedName, poolName)
 					// discard the legacy allocation for subnet.status
 					continue
 				}

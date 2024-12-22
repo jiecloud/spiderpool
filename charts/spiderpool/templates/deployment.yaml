@@ -161,14 +161,24 @@ spec:
           value: {{ .Values.spiderpoolController.httpPort | quote }}
         - name: SPIDERPOOL_GC_IP_ENABLED
           value: {{ .Values.ipam.gc.enabled | quote }}
-        - name: SPIDERPOOL_GC_TERMINATING_POD_IP_ENABLED
-          value: {{ .Values.ipam.gc.GcDeletingTimeOutPod.enabled | quote }}
+        - name: SPIDERPOOL_GC_STATELESS_TERMINATING_POD_ON_READY_NODE_ENABLED
+          value: {{ .Values.ipam.gc.statelessPod.zombieOnReadyNode | quote }}
+        - name: SPIDERPOOL_GC_STATELESS_TERMINATING_POD_ON_NOT_READY_NODE_ENABLED
+          value: {{ .Values.ipam.gc.statelessPod.zombieOnNotReadyNode | quote }}
         - name: SPIDERPOOL_GC_ADDITIONAL_GRACE_DELAY
-          value: {{ .Values.ipam.gc.GcDeletingTimeOutPod.delay | quote }}
+          value: {{ .Values.ipam.gc.gcDeletingTimeOutPodDelay | quote }}
         - name: SPIDERPOOL_GC_DEFAULT_INTERVAL_DURATION
           value: {{ .Values.ipam.gc.gcAll.intervalInSecond | quote }}
         - name: SPIDERPOOL_MULTUS_CONFIG_ENABLED
           value: {{ .Values.multus.enableMultusConfig | quote }}
+        - name: SPIDERPOOL_CNI_CONFIG_DIR
+          value: {{ .Values.global.cniConfHostPath | quote }}
+        - name: SPIDERPOOL_COORDINATOR_ENABLED
+          value: {{ .Values.coordinator.enabled | quote }}
+        - name: SPIDERPOOL_COORDINATOR_DEAFULT_NAME
+          value: {{ .Values.coordinator.name | quote }}
+        - name: SPIDERPOOL_CILIUM_CONFIGMAP_NAMESPACE_NAME
+          value: {{ .Values.global.ciliumConfigMap | quote }}
         - name: SPIDERPOOL_POD_NAME
           valueFrom:
             fieldRef:
@@ -177,6 +187,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        - name: SPIDERPOOL_CONTROLLER_DEPLOYMENT_NAME
+          value: {{ .Values.spiderpoolController.name | quote }}
         {{- with .Values.spiderpoolController.extraEnv }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -187,6 +199,9 @@ spec:
         volumeMounts:
         - name: config-path
           mountPath: /tmp/spiderpool/config-map
+          readOnly: true
+        - name: cni-conf-dir
+          mountPath: {{ .Values.global.cniConfHostPath }}
           readOnly: true
         - name: tls
           mountPath: /etc/tls
@@ -199,6 +214,10 @@ spec:
       - name: config-path
         configMap:
           name: {{ .Values.global.configName }}
+      - name: cni-conf-dir
+        hostPath:
+          path:  {{ .Values.global.cniConfHostPath }}
+          type: DirectoryOrCreate
       - name: tls
         projected:
           defaultMode: 0400

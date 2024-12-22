@@ -88,12 +88,26 @@ paths:
         Delete multiple ip for a pod, case for spiderflat compent
       tags:
         - daemonset
+      parameters:
+        - name: ipam-batch-del-args
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/IpamBatchDelArgs"
       responses:
         "200":
           description: Success
         '500':
           description: Addresses release failure
           x-go-name: Failure
+          schema:
+            $ref: "#/definitions/Error"
+        '521':
+          description: Forbid to release IPs for stateless workload
+          schema:
+            $ref: "#/definitions/Error"
+        '522':
+          description: Forbid to release IPs for stateful workload
           schema:
             $ref: "#/definitions/Error"
   "/workloadendpoint":
@@ -300,9 +314,9 @@ definitions:
     description: Coordinator config
     type: object
     properties:
-      tuneMode:
+      mode:
         type: string
-      podCIDR:
+      overlayPodCIDR:
         type: array
         items:
           type: string
@@ -310,7 +324,7 @@ definitions:
         type: array
         items:
           type: string
-      extraCIDR:
+      hijackCIDR:
         type: array
         items:
           type: string
@@ -322,16 +336,20 @@ definitions:
         type: string
       hostRuleTable:
         type: integer
-      hostRPFilter:
+      podRPFilter:
+        type: integer
+      txQueueLen:
         type: integer
       detectIPConflict:
         type: boolean
       detectGateway:
         type: boolean
+      vethLinkAddress:
+        type: string
     required:
-      - tuneMode
-      - podCIDR
+      - overlayPodCIDR
       - serviceCIDR
+      - mode
       - tunePodRoutes
   GetCoordinatorArgs:
     description: Get Coordinator Args
@@ -341,3 +359,24 @@ definitions:
         type: string
       podNamespace:
         type: string
+  IpamBatchDelArgs:
+    description: IPAM release IPs information
+    type: object
+    properties:
+      isReleaseConflictIPs:
+        type: boolean
+      containerID:
+        type: string
+      netNamespace:
+        type: string
+      podNamespace:
+        type: string
+      podName:
+        type: string
+      podUID:
+        type: string
+    required:
+      - containerID
+      - podNamespace
+      - podName
+      - podUID

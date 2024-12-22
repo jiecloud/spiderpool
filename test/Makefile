@@ -10,21 +10,41 @@ all: usage
 .PHONY: e2e
 e2e:  kind-init e2e-test
 
+.PHONY: init_env_with_release
+init_env_with_release:
+	VERSION=`cat ../VERSION | tr -d '\n' ` ; [ -n "$${VERSION}" ] || { echo "error, wrong version" ; exit 1 ; } ; \
+		echo "check version $${VERSION}" ; \
+		for NAME in $(SPIDERPOOL_IMAGES); do \
+			if $(CONTAINER_ENGINE) images $${NAME}:$${VERSION} | grep -q $${VERSION} &>/dev/null ; then \
+				echo "test's image $${NAME}:$${VERSION} found" && continue ; \
+			fi ; \
+			if $(CONTAINER_ENGINE) pull $${NAME}:$${VERSION} ; then \
+				echo "Successfully pulled test image $${NAME}:$${VERSION}" && continue ; \
+			fi ; \
+			echo "error, failed to pull $${NAME}:$${VERSION}, please check if the image exists or try running it with `-e E2E_CHINA_IMAGE_REGISTRY=true`." >&2 && false ; \
+		 done
+	$(QUIET)  make kind-init -e E2E_SPIDERPOOL_TAG=${VERSION}
 
 .PHONY: kind-init
 kind-init: check_env prepare
 	@echo -e "\033[35m [Step 3] Init kind for the cluster: $(E2E_CLUSTER_NAME) \033[0m"
-	make setup_kind
+	E2E_KIND_IMAGE_TAG=$(E2E_KIND_IMAGE_TAG) make setup_kind
 	@echo -e "\033[35m [Step 4] Init network config for kind-node \033[0m"
 	E2E_IP_FAMILY=$(E2E_IP_FAMILY) \
 		E2E_CLUSTER_NAME=$(E2E_CLUSTER_NAME)  \
-		E2E_KUBECONFIG=$(E2E_KUBECONFIG)  \
-		INSTALL_NETTOOLS=$(INSTALL_NETTOOLS) \
 		E2E_VLAN_GATEWAY_IMAGE=$(E2E_VLAN_GATEWAY_IMAGE) \
 		VLAN_GATEWAY_CONTAINER=$(VLAN_GATEWAY_CONTAINER) \
 		$(QUIET) bash scripts/config-network.sh
-	@echo -e "\033[35m [Step 5] Install The CNI-Plugins: $(CNI_PACKAGE_VERSION)  \033[0m"
-	$(QUIET) bash scripts/cni-install.sh $(E2E_CLUSTER_NAME) $(DOWNLOAD_DIR)
+ifeq ($(INSTALL_OVS),true)
+	@echo -e "\033[35m [Step 5] Install openvswitch \033[0m"
+	DOCKER_ADDITIONAL_NETWORK=$(DOCKER_ADDITIONAL_NETWORK) \
+		E2E_CLUSTER_NAME=$(E2E_CLUSTER_NAME)  \
+		HOST_ADDITIONAL_INTERFACE=$(HOST_ADDITIONAL_INTERFACE) \
+		BRIDGE_INTERFACE=$(BRIDGE_INTERFACE) \
+		E2E_IP_FAMILY=$(E2E_IP_FAMILY) \
+		HTTP_PROXY=$(HTTP_PROXY) \
+		$(QUIET) bash scripts/install-ovs.sh
+endif
 ifeq ($(INSTALL_OVERLAY_CNI),true)
 	@echo -e "\033[35m [Step 6] Install Default-CNI: Calico-$(CALICO_VERSION) Cilium-$(CILIUM_VERSION) \033[0m"
 	E2E_KUBECONFIG=$(E2E_KUBECONFIG)  \
@@ -33,6 +53,7 @@ ifeq ($(INSTALL_OVERLAY_CNI),true)
 		INSTALL_CALICO=$(INSTALL_CALICO) \
 		INSTALL_CILIUM=$(INSTALL_CILIUM) \
 		CALICO_VERSION=$(CALICO_VERSION) \
+		DEFAULT_CALICO_VERSION=$(DEFAULT_CALICO_VERSION) \
 		CALICO_IMAGE_REPO=$(CALICO_IMAGE_REPO) \
 		CLUSTER_PATH=$(CLUSTER_DIR)/$(E2E_CLUSTER_NAME) \
 		CALICO_AUTODETECTION_METHOD=$(CALICO_AUTODETECTION_METHOD) \
@@ -40,48 +61,59 @@ ifeq ($(INSTALL_OVERLAY_CNI),true)
 		CILIUM_VERSION=$(CILIUM_VERSION) \
 		CILIUM_CLUSTER_POD_SUBNET_V4=$(CILIUM_CLUSTER_POD_SUBNET_V4) \
 		CILIUM_CLUSTER_POD_SUBNET_V6=$(CILIUM_CLUSTER_POD_SUBNET_V6) \
+		DISABLE_KUBE_PROXY=$(DISABLE_KUBE_PROXY) \
+		CALICO_CLUSTER_POD_SUBNET_V4=$(CALICO_CLUSTER_POD_SUBNET_V4) \
+		CALICO_CLUSTER_POD_SUBNET_V4=$(CALICO_CLUSTER_POD_SUBNET_V4) \
 		HTTP_PROXY=$(HTTP_PROXY) \
 		$(QUIET) bash scripts/install-default-cni.sh
 endif
 	@echo -e "\033[35m [Step 7] Install Spiderpool \033[0m"
 	@ make setup_spiderpool
-ifeq ($(INSTALL_MULTUS),true)
 	@echo -e "\033[35m [Step 8] Install Multus \033[0m"
-	@ IMAGE_MULTUS=$(IMAGE_MULTUS_NAME) \
-		E2E_IP_FAMILY=$(E2E_IP_FAMILY) \
+	@ E2E_IP_FAMILY=$(E2E_IP_FAMILY) \
 		MULTUS_DEFAULT_CNI_NAME=$(MULTUS_DEFAULT_CNI_VLAN0) \
-		MULTUS_DEFAULT_CNI_CALICO=$(MULTUS_DEFAULT_CNI_CALICO) \
-		MULTUS_DEFAULT_CNI_CILIUM=$(MULTUS_DEFAULT_CNI_CILIUM) \
 		MULTUS_DEFAULT_CNI_VLAN100=$(MULTUS_DEFAULT_CNI_VLAN100) \
 		MULTUS_DEFAULT_CNI_VLAN200=$(MULTUS_DEFAULT_CNI_VLAN200) \
-		MULTUS_ADDITIONAL_CNI_VLAN100=$(MULTUS_ADDITIONAL_CNI_VLAN100) \
-		MULTUS_ADDITIONAL_CNI_VLAN200=$(MULTUS_ADDITIONAL_CNI_VLAN200) \
+		MULTUS_OVS_CNI_VLAN30=$(MULTUS_OVS_CNI_VLAN30) \
+		MULTUS_OVS_CNI_VLAN40=$(MULTUS_OVS_CNI_VLAN40) \
+		INSTALL_OVS=$(INSTALL_OVS) \
 		RELEASE_NAMESPACE=$(RELEASE_NAMESPACE) \
+		DISABLE_KUBE_PROXY=$(DISABLE_KUBE_PROXY) \
 		CLUSTER_PATH=$(CLUSTER_DIR)/$(E2E_CLUSTER_NAME) \
 		E2E_SPIDERPOOL_ENABLE_SUBNET=${E2E_SPIDERPOOL_ENABLE_SUBNET} \
 		scripts/install-multus.sh $(E2E_CLUSTER_NAME) $(E2E_KUBECONFIG)
-endif
 ifeq ($(INSTALL_KRUISE),true)
-	@echo -e "\033[35m [Step 9] Install third-party controllers: kurise \033[0m"
-	@ make setup_kurise
+	@echo -e "\033[35m [Step 9] Install operator: kruise \033[0m"
+	@ make setup_kruise
 endif
-ifeq ($(INSTALL_SPIDERDOCTOR),true)
-	@echo -e "\033[35m [Step 10] Install SpiderDoctor \033[0m"
+ifeq ($(INSTALL_KDOCTOR),true)
+	@echo -e "\033[35m [Step 10] Install kdoctor \033[0m"
 	E2E_KUBECONFIG=$(E2E_KUBECONFIG)  \
 		E2E_IP_FAMILY=$(E2E_IP_FAMILY) \
 		E2E_CLUSTER_NAME=$(E2E_CLUSTER_NAME) \
-		SPIDERDOCTOR_VERSION=$(SPIDERDOCTOR_VERSION) \
-		SPIDERDOCTOR_REPORT_PATH=$(SPIDERDOCTOR_REPORT_PATH) \
-		E2E_SPIDERDOCTOR_IMAGE_REPO=$(E2E_SPIDERDOCTOR_IMAGE_REPO) \
+		KDOCTOR_VERSION=$(KDOCTOR_VERSION) \
+		KDOCTOR_REPORT_PATH=$(KDOCTOR_REPORT_PATH) \
+		E2E_KDOCTOR_IMAGE_REPO=$(E2E_KDOCTOR_IMAGE_REPO) \
 		HTTP_PROXY=$(HTTP_PROXY) \
-		$(QUIET) bash scripts/install-spiderdoctor.sh
+		$(QUIET) bash scripts/install-kdoctor.sh
+endif
+ifeq ($(INSTALL_KUBEVIRT),true)
+	@echo -e "\033[35m [Step 11] Install kubevirt \033[0m"
+	E2E_KUBECONFIG=$(E2E_KUBECONFIG)  \
+		E2E_CLUSTER_NAME=$(E2E_CLUSTER_NAME) \
+		HTTP_PROXY=$(HTTP_PROXY) \
+		KUBEVIRT_VERSION=$(KUBEVIRT_VERSION) \
+		E2E_KUBEVIRT_IMAGE_REPO=$(E2E_KUBEVIRT_IMAGE_REPO) \
+		$(QUIET) bash scripts/install-kubevirt.sh
 endif
 	@ echo "wait for the cluster ready" ; \
 		TEST_IMAGE_NAME=$(TEST_IMAGE_NAME) \
 		RELEASE_NAMESPACE=$(RELEASE_NAMESPACE) \
+		E2E_IP_FAMILY=$(E2E_IP_FAMILY) \
 		MULTUS_DEFAULT_CNI_NAME=$(MULTUS_DEFAULT_CNI_VLAN0) \
 		E2E_CLUSTER_NAME=$(E2E_CLUSTER_NAME) \
-		scripts/installTestPod.sh $(E2E_KUBECONFIG) $(INSTALL_MULTUS)
+		INSTALL_OVERLAY_CNI=$(INSTALL_OVERLAY_CNI) \
+		scripts/preCheckClusterReady.sh $(E2E_KUBECONFIG)
 	@echo ""
 	@echo "-----------------------------------------------------------------------------------------------------"
 	@echo "       ip family: $(E2E_IP_FAMILY)"
@@ -97,7 +129,7 @@ endif
 	@echo "-----------------------------------------------------------------------------------------------------"
 	@echo ""
 	@ KUBECONFIG=$(E2E_KUBECONFIG) kubectl get pods -o wide -A
-
+	make post_installation
 
 .PHONY: setup_kind
 setup_kind:
@@ -107,19 +139,39 @@ setup_kind:
 	- sudo sysctl -w fs.inotify.max_user_instances=8192 || true
 	- sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0
 	$(QUIET) mkdir -p -v $(CLUSTER_DIR)/$(E2E_CLUSTER_NAME)
-	$(QUIET) kube_proxy_mode=$(E2E_KUBE_PROXY_MODE) ip_family=$(E2E_IP_FAMILY) \
-			 kind_image_tag=$(E2E_KIND_IMAGE_TAG) \
-			 kind_image_name=$(E2E_KIND_IMAGE_NAME) \
-			 disable_default_cni=$(E2E_DISABLE_DEFAULT_CNI) \
-			 CLUSTER_POD_SUBNET_V4=$(CLUSTER_POD_SUBNET_V4) \
-			 CLUSTER_POD_SUBNET_V6=$(CLUSTER_POD_SUBNET_V6) \
-			 K8S_IPV4_SERVICE_CIDR=$(K8S_IPV4_SERVICE_CIDR) \
-			 K8S_IPV6_SERVICE_CIDR=$(K8S_IPV6_SERVICE_CIDR) \
-			 p2ctl -t $(ROOT_DIR)/test/yamls/kind-config.tmpl > $(CLUSTER_DIR)/$(E2E_CLUSTER_NAME)/kind-config.yaml
-	$(QUIET) cat $(CLUSTER_DIR)/$(E2E_CLUSTER_NAME)/kind-config.yaml
-	$(QUIET) kind create cluster \
-		--config $(CLUSTER_DIR)/$(E2E_CLUSTER_NAME)/kind-config.yaml \
-		--name $(E2E_CLUSTER_NAME) --kubeconfig $(E2E_KUBECONFIG)
+	NEW_KIND_YAML=$(CLUSTER_DIR)/$(E2E_CLUSTER_NAME)/kind-config.yaml ;\
+		INSERT_LINE=` grep "insert inform" $(GLOBAL_KIND_CONFIG_PATH) -n | awk -F':' '{print $$1}' ` ; \
+		echo "insert after line $${INSERT_LINE}" ;\
+		sed  ''"$${INSERT_LINE}"' a \  kubeProxyMode: $(E2E_KUBE_PROXY_MODE)' $(GLOBAL_KIND_CONFIG_PATH) > $${NEW_KIND_YAML} ; \
+		sed -i ''"$${INSERT_LINE}"' a \  disableDefaultCNI: $(E2E_DISABLE_DEFAULT_CNI)' $${NEW_KIND_YAML} ;\
+		sed -i ''"$${INSERT_LINE}"' a \  ipFamily: $(E2E_IP_FAMILY)' $${NEW_KIND_YAML} ;\
+		if [ "$(E2E_IP_FAMILY)" == "ipv4" ] ; then \
+			sed -i  ''"$${INSERT_LINE}"' a \  podSubnet: "$(CLUSTER_POD_SUBNET_V4)"' $${NEW_KIND_YAML} ;\
+			sed -i  ''"$${INSERT_LINE}"' a \  serviceSubnet: "$(K8S_IPV4_SERVICE_CIDR)"' $${NEW_KIND_YAML} ;\
+		elif [ "$(E2E_IP_FAMILY)" == "ipv6" ] ; then \
+			sed -i  ''"$${INSERT_LINE}"' a \  podSubnet: "$(CLUSTER_POD_SUBNET_V6)"' $${NEW_KIND_YAML} ; \
+			sed -i  ''"$${INSERT_LINE}"' a \  serviceSubnet: "$(K8S_IPV6_SERVICE_CIDR)"' $${NEW_KIND_YAML} ; \
+		else \
+			sed -i  ''"$${INSERT_LINE}"' a \  podSubnet: "$(CLUSTER_POD_SUBNET_V4),$(CLUSTER_POD_SUBNET_V6)"' $${NEW_KIND_YAML}  ; \
+			sed -i  ''"$${INSERT_LINE}"' a \  serviceSubnet: "$(K8S_IPV4_SERVICE_CIDR),$(K8S_IPV6_SERVICE_CIDR)"' $${NEW_KIND_YAML}  ; \
+  		fi ; \
+		if [ $$(echo -e "$(E2E_KIND_IMAGE_TAG)\nv1.29.0" | sort -V | tail -n1) == "$(E2E_KIND_IMAGE_TAG)" ]; then \
+			echo "the following features are only fully supported in versions higher than v1.29.0." ; \
+			sed -i  '$$  a\runtimeConfig: ' $${NEW_KIND_YAML}  ; \
+			sed -i  '$$  a\   api/alpha: "true"' $${NEW_KIND_YAML}  ; \
+			sed -i  '$$  a\featureGates: ' $${NEW_KIND_YAML}  ; \
+			sed -i  '$$  a\   MultiCIDRServiceAllocator: true' $${NEW_KIND_YAML}  ; \
+			if [ "${E2E_SPIDERPOOL_ENABLE_DRA}" == "true" ]; then \
+				sed -i  '$$  a\   DynamicResourceAllocation: true' $${NEW_KIND_YAML}  ; \
+				printf 'containerdConfigPatches: \n# Enable CDI as described in https://tags.cncf.io/container-device-interface#containerd-configuration\n- |-\n  [plugins."io.containerd.grpc.v1.cri"]\n    enable_cdi = true\n ' >> $${NEW_KIND_YAML} ; \
+			fi ;\
+		fi ; \
+	$(QUIET) cat $(CLUSTER_DIR)/$(E2E_CLUSTER_NAME)/kind-config.yaml ; \
+	echo "-------------" ; \
+		KIND_OPTION="" ; \
+       		[ -n "$(E2E_KIND_IMAGE_TAG)" ] && KIND_OPTION=" --image $(E2E_KIND_IMAGE_NAME):$(E2E_KIND_IMAGE_TAG) " && echo "setup kind with $(E2E_KIND_IMAGE_NAME):$(E2E_KIND_IMAGE_TAG)"; \
+            kind create cluster --config $(CLUSTER_DIR)/$(E2E_CLUSTER_NAME)/kind-config.yaml \
+			--name $(E2E_CLUSTER_NAME) --kubeconfig $(E2E_KUBECONFIG) $${KIND_OPTION}
 	- kubectl --kubeconfig $(E2E_KUBECONFIG) taint nodes --all node-role.kubernetes.io/master- || true
 	- kubectl --kubeconfig $(E2E_KUBECONFIG) taint nodes --all node-role.kubernetes.io/control-plane- || true
 	for ((N=0;N<=30;N++)); do \
@@ -127,7 +179,14 @@ setup_kind:
 		kubectl get node --kubeconfig $(E2E_KUBECONFIG) &>/dev/null && break ; \
 		echo "wait for node ready" ; \
 	done ; \
-    kubectl get node --kubeconfig $(E2E_KUBECONFIG) &>/dev/null || { echo "error, cluster is not ready" ; exit 1 ; }
+	kubectl get node --kubeconfig $(E2E_KUBECONFIG) &>/dev/null || { echo "error, cluster is not ready" ; exit 1 ; }
+	if [ "$(E2E_SPIDERPOOL_ENABLE_DRA)" == "true" ] ; then \
+		NODE_LIST=` docker ps | egrep "kindest/node.* $(E2E_CLUSTER_NAME)-(control|worker)" | awk '{print $$1 }' ` ; \
+		[ -n "$$NODE_LIST" ] || { echo "error, failed to find any kind nodes, please setup kind cluster $(E2E_CLUSTER_NAME) first" ; exit 1 ; } ; \
+		for NODE in $${NODE_LIST} ; do \
+			docker exec $${NODE} touch $(E2E_SPIDERPOOL_DRA_SOLIBRARY_PATH) ; \
+		done \
+	fi ; \
 	echo "show kubernetes node image " && docker ps
 	@echo "===================== deploy prometheus CRD ========== "
 	{ timeout 10 kubectl apply --kubeconfig $(E2E_KUBECONFIG) -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml ; } \
@@ -142,8 +201,22 @@ setup_kind:
 		|| kubectl apply --kubeconfig $(E2E_KUBECONFIG) -f ./yamls/grafanadashboards.yaml
 
 
-.PHONY: setup_kurise
-setup_kurise:
+.PHONY: post_installation
+post_installation:
+    @echo "check cni binary on nodes: $(POST_INSTALL_CHECK_CNI_BINARY) " ; \
+		NODE_LIST=` docker ps | egrep "kindest/node.* $(E2E_CLUSTER_NAME)-(control|worker)" | awk '{print $$1 }' ` ; \
+		[ -n "$$NODE_LIST" ] || { echo "error, failed to find any kind nodes, please setup kind cluster $(E2E_CLUSTER_NAME) first" ; exit 1 ; } ; \
+		for NODE in $${NODE_LIST} ; do \
+			ALL_BIN=`docker exec $${NODE} ls /opt/cni/bin ` || { echo "error, failed to get cni under /opt/cni/bin on node $${NODE} " ; exit 1 ; }; \
+			ALL_BIN=` echo "$${ALL_BIN}" | tr '\n' ' ' ` ; \
+			echo "all binary on node $${NODE}: $${ALL_BIN} " ; \
+			for ITEM in $(POST_INSTALL_CHECK_CNI_BINARY) ; do \
+			     grep " $${ITEM} " <<< " $${ALL_BIN} " &>/dev/null || { echo "error, miss $${ITEM} under /opt/cni/bin on node $${NODE} " ; exit 1 ; } ; \
+			done ; \
+		done
+
+.PHONY: setup_kruise
+setup_kruise:
 	@echo "add openkruise charts repository..." ; \
 		[ -z "$(HTTP_PROXY)" ] || export https_proxy=$(HTTP_PROXY) ; \
 			helm repo add openkruise https://openkruise.github.io/charts/ ; \
@@ -152,14 +225,15 @@ setup_kurise:
 				docker pull $${IMAGE} ; \
 				kind load docker-image $${IMAGE} --name $(E2E_CLUSTER_NAME);	\
 			done; \
-			helm install kruise openkruise/kruise --kubeconfig $(E2E_KUBECONFIG) --wait --debug --set manager.image.repository=$(E2E_OPENKRUISE_IMAGE)
+			HELM_OPTION=" --wait --timeout 20m --debug --set manager.image.repository=$(E2E_OPENKRUISE_IMAGE) " ; \
+			# openkruise failed to run with 1.7.3, see 
+			# https://github.com/spidernet-io/spiderpool/issues/4396
+			HELM_OPTION+=" --version $(E2E_OPENKRUISE_VERSION) " ; \
+			helm upgrade --install kruise openkruise/kruise $${HELM_OPTION} \
+			    --kubeconfig $(E2E_KUBECONFIG) || { KIND_CLUSTER_NAME=$(E2E_CLUSTER_NAME) ./scripts/debugEnv.sh $(E2E_KUBECONFIG) "detail" "$(E2E_LOG_FILE)" ; exit 1 ; } ; \
 
 .PHONY: setup_spiderpool
 setup_spiderpool:
-	@echo "Load Image $(E2E_SPIDERPOOL_TAG) to kind..." ; \
-		for i in $(SPIDERPOOL_IMAGES); do \
-			kind load docker-image $${i}:$(E2E_SPIDERPOOL_TAG) --name $(E2E_CLUSTER_NAME);	\
-		done; \
 		if [ "$(USE_TLS_METHOD)" == "certmanager" ] ; then \
 			echo "USE_TLS_METHOD $(USE_TLS_METHOD) " ; \
 			$(QUIET) IMAGE_CERT_MANAGER="$(IMAGE_CERT_MANAGER_NAME)" scripts/install-cert-manager.sh "$(E2E_CLUSTER_NAME)" "$(CERT_MANAGER_ISSUER_NAME)" ; \
@@ -183,64 +257,87 @@ setup_spiderpool:
 		else \
 		  	HELM_OPTION+=" --set coordinator.enabled=false " ; \
 		fi ; \
-		HELM_OPTION+=" --set coordinator.detectIPConflict=false --set coordinator.detectGateway=false " ; \
-		if [ "$(INSTALL_MULTUS)" == "true" ] ; then \
-		    HELM_OPTION+=" --set multus.multusCNI.install=true " ; \
-		    HELM_OPTION+=" --set multus.multusCNI.image.registry= " ; \
-		    HELM_OPTION+=" --set multus.multusCNI.image.repository=$(E2E_MULTUS_IMAGE_NAME) " ; \
-		    if [ "$(INSTALL_OVERLAY_CNI)" == "true" ]; then \
+		HELM_OPTION+=" --set global.tuneSysctlConfig=true " ; \
+		HELM_OPTION+=" --set multus.multusCNI.install=true " ; \
+		HELM_OPTION+=" --set multus.multusCNI.uninstall=true " ; \
+		HELM_OPTION+=" --set multus.multusCNI.image.registry= " ; \
+		HELM_OPTION+=" --set multus.multusCNI.image.repository=$(E2E_MULTUS_IMAGE_NAME) " ; \
+		if [ "$(INSTALL_OVERLAY_CNI)" == "true" ]; then \
 			HELM_OPTION+=" --set multus.multusCNI.defaultCniCRName= " ; \
-		    else \
-			HELM_OPTION+=" --set multus.multusCNI.defaultCniCRName=$(MULTUS_DEFAULT_CNI_VLAN0) " ; \
-		    fi ; \
-			IMAGE_MULTUS=`helm template $(RELEASE_NAME) $(ROOT_DIR)/charts/spiderpool $${HELM_OPTION} | grep ' image: ' | grep multus | tr -d '"' | awk '{print $$2}' | sort | uniq | tr '\n' ' '` ; \
-			echo "MULTUS IMAGE: $${IMAGE_MULTUS} " ; \
-			docker pull $${IMAGE_MULTUS} ; \
-		 	kind load docker-image $${IMAGE_MULTUS}  --name $(E2E_CLUSTER_NAME); \
-				if [ "$(E2E_SPIDERPOOL_ENABLE_MULTUSCONFIG)" == "true" ] ; then \
-					HELM_OPTION+=" --set multus.enableMultusConfig=true " ; \
-				else \
-					HELM_OPTION+=" --set multus.enableMultusConfig=false " ; \
-				fi ; \
 		else \
-		    HELM_OPTION+=" --set multus.multusCNI.install=false " ; \
+			HELM_OPTION+=" --set multus.multusCNI.defaultCniCRName=$(MULTUS_DEFAULT_CNI_VLAN0) " ; \
+		fi ; \
+		if [ "$(E2E_SPIDERPOOL_ENABLE_MULTUSCONFIG)" == "true" ] ; then \
+			HELM_OPTION+=" --set multus.enableMultusConfig=true " ; \
+		else \
+			HELM_OPTION+=" --set multus.enableMultusConfig=false " ; \
 		fi ; \
 		if [ "$(E2E_SPIDERPOOL_ENABLE_SUBNET)" == "true" ] ; then \
-		    HELM_OPTION+=" --set ipam.enableSpiderSubnet=true " ; \
+		    HELM_OPTION+=" --set ipam.spiderSubnet.enable=true " ; \
 		else \
-		    HELM_OPTION+=" --set ipam.enableSpiderSubnet=false " ; \
+		    HELM_OPTION+=" --set ipam.spiderSubnet.enable=false " ; \
+		fi ; \
+		if [ "$(INSTALL_SRIOV)" == "true" ] ; then \
+			HELM_OPTION+=" --set sriov.install=true " ; \
+		else \
+			HELM_OPTION+=" --set sriov.install=false " ; \
+		fi ; \
+		if [ "$(INSTALL_RDMA)" == "true" ] ; then \
+		    HELM_OPTION+=" --set rdma.rdmaSharedDevicePlugin.install=true " ; \
+			HELM_OPTION+=" --set plugins.installRdmaCNI=true " ; \
+		else \
+		    HELM_OPTION+=" --set rdma.rdmaSharedDevicePlugin.install=false " ; \
+			HELM_OPTION+=" --set plugins.installRdmaCNI=false " ; \
 		fi ; \
 		HELM_OPTION+=" --set spiderpoolAgent.debug.logLevel=debug --set spiderpoolController.debug.logLevel=debug  " ; \
-		HELM_OPTION+=" --set ipam.gc.gcAll.intervalInSecond=120 " ; \
-		if [ "$(E2E_IP_FAMILY)" == "ipv4" ] ; then \
-			ipv4_subnet=$$(docker network inspect kind -f {{\(index\ $$.IPAM.Config\ 0\).Subnet}}) ; \
+		HELM_OPTION+=" --set ipam.gc.gcAll.intervalInSecond=30 " ; \
+		echo "docker network inspect kind" ; \
+		docker network inspect kind ;\
+		if [ "$(E2E_IP_FAMILY)" == "ipv4" ]  ; then \
+			ipv4_subnet=`docker network inspect kind | jq -r '.[0].IPAM.Config[].Subnet' | grep -Eo '^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\/[0-9]+)$$'` || { echo "err, no IPv4 subnet found for Docker network" ; exit 1 ; }  ; \
+			ipv4_gateway=`docker network inspect kind | jq -r '.[0].IPAM.Config[].Gateway' | grep -Eo '^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})$$'` || { echo "err, no IPv4 gateway found for Docker network" ; exit 1 ; }  ; \
+			echo "docker network kind IPv4 subnet: $${ipv4_subnet}"; \
+			echo "docker network kind IPv4 gateway: $${ipv4_gateway}"; \
 			ipv4_prefix=$$(echo $${ipv4_subnet} | awk '{split($$0,a,".");printf "%s.%s",a[1],a[2]}'); \
 			ipv4_ip_range=$${ipv4_prefix}.40.2-$${ipv4_prefix}.40.254 ; \
 			HELM_OPTION+=" --set clusterDefaultPool.installIPv4IPPool=true --set clusterDefaultPool.installIPv6IPPool=false" ; \
 			HELM_OPTION+=" --set clusterDefaultPool.ipv4IPPoolName=default-v4-ippool" ; \
 			HELM_OPTION+=" --set clusterDefaultPool.ipv4Subnet=$${ipv4_subnet}" ; \
+			HELM_OPTION+=" --set clusterDefaultPool.ipv4Gateway=$${ipv4_gateway}" ; \
 			HELM_OPTION+=" --set clusterDefaultPool.ipv4IPRanges={$${ipv4_ip_range}}" ; \
 			HELM_OPTION+=" --set ipam.enableIPv4=true --set ipam.enableIPv6=false" ; \
 		elif [ "$(E2E_IP_FAMILY)" == "ipv6" ] ; then \
-			ipv6_subnet=$$(docker network inspect kind -f {{\(index\ $$.IPAM.Config\ 1\).Subnet}}) ; \
+			ipv6_subnet=`docker network inspect kind | jq -r '.[0].IPAM.Config[].Subnet' | grep -Eo '^([a-fA-F0-9:]+\/[0-9]+)$$'` || { echo "err, no IPv6 subnet found for Docker network" ; exit 1 ; } ; \
+			ipv6_gateway=`docker network inspect kind | jq -r '.[0].IPAM.Config[].Gateway' | grep -Eo '^([a-f0-9:]+:+)+[a-f0-9]+$$'` || { echo "err, no IPv6 gateway found for Docker network" ; }  ; \
+			echo "docker network kind IPv6 subnet: $${ipv6_subnet}"; \
+			echo "docker network kind IPv6 gateway: $${ipv6_gateway}"; \
 			ipv6_ip_range=$${ipv6_subnet%::*}:f::2-$${ipv6_subnet%::*}:f::fe ; \
 			HELM_OPTION+=" --set clusterDefaultPool.installIPv4IPPool=false --set clusterDefaultPool.installIPv6IPPool=true" ; \
 			HELM_OPTION+=" --set clusterDefaultPool.ipv6IPPoolName=default-v6-ippool" ; \
 			HELM_OPTION+=" --set clusterDefaultPool.ipv6Subnet=$${ipv6_subnet}" ; \
+			HELM_OPTION+=" --set clusterDefaultPool.ipv6Gateway=$${ipv6_gateway}" ; \
 			HELM_OPTION+=" --set clusterDefaultPool.ipv6IPRanges={$${ipv6_ip_range}}" ; \
 			HELM_OPTION+=" --set ipam.enableIPv4=false --set ipam.enableIPv6=true" ; \
 		else \
-			ipv4_subnet=$$(docker network inspect kind -f {{\(index\ $$.IPAM.Config\ 0\).Subnet}}) ; \
-			ipv6_subnet=$$(docker network inspect kind -f {{\(index\ $$.IPAM.Config\ 1\).Subnet}}) ; \
+			ipv4_subnet=`docker network inspect kind | jq -r '.[0].IPAM.Config[].Subnet' | grep -Eo '^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\/[0-9]+)$$'` || { echo "err, no IPv4 subnet found for Docker network" ; exit 1 ; }  ; \
+			ipv4_gateway=`docker network inspect kind | jq -r '.[0].IPAM.Config[].Gateway' | grep -Eo '^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})$$'` || { echo "err, no IPv4 gateway found for Docker network" ; }  ; \
+			echo "docker network kind IPv4 subnet: $${ipv4_subnet}"; \
+			echo "docker network kind IPv4 gateway: $${ipv4_gateway}"; \
+			ipv6_subnet=`docker network inspect kind | jq -r '.[0].IPAM.Config[].Subnet' | grep -Eo '^([a-fA-F0-9:]+\/[0-9]+)$$'` || { echo "err, no IPv6 subnet found for Docker network" ; exit 1 ; } ; \
+			ipv6_gateway=`docker network inspect kind | jq -r '.[0].IPAM.Config[].Gateway' | grep -Eo '^([a-f0-9:]+:+)+[a-f0-9]+$$'` || { echo "err, no IPv6 gateway found for Docker network" ; }  ; \
+			echo "docker network kind IPv6 subnet: $${ipv6_subnet}"; \
+			echo "docker network kind IPv6 gateway: $${ipv6_gateway}"; \
 			ipv4_prefix=$$(echo $${ipv4_subnet} | awk '{split($$0,a,".");printf "%s.%s",a[1],a[2]}') ; \
 			ipv4_ip_range=$${ipv4_prefix}.40.2-$${ipv4_prefix}.40.254 ; \
 			ipv6_ip_range=$${ipv6_subnet%::*}:f::2-$${ipv6_subnet%::*}:f::fe ; \
 			HELM_OPTION+=" --set clusterDefaultPool.installIPv4IPPool=true --set clusterDefaultPool.installIPv6IPPool=true" ; \
 			HELM_OPTION+=" --set clusterDefaultPool.ipv4IPPoolName=default-v4-ippool --set clusterDefaultPool.ipv6IPPoolName=default-v6-ippool" ; \
 			HELM_OPTION+=" --set clusterDefaultPool.ipv4Subnet=$${ipv4_subnet} --set clusterDefaultPool.ipv6Subnet=$${ipv6_subnet}" ; \
+			HELM_OPTION+=" --set clusterDefaultPool.ipv4Gateway=$${ipv4_gateway} --set clusterDefaultPool.ipv6Gateway=$${ipv6_gateway} " ; \
 			HELM_OPTION+=" --set clusterDefaultPool.ipv4IPRanges={$${ipv4_ip_range}} --set clusterDefaultPool.ipv6IPRanges={$${ipv6_ip_range}}" ; \
 			HELM_OPTION+=" --set ipam.enableIPv4=true --set ipam.enableIPv6=true" ; \
 		fi ; \
+		HELM_OPTION+=" --set spiderpoolController.podResourceInject.enabled=true " ; \
 		HELM_OPTION+=" --set spiderpoolAgent.prometheus.enabled=true --set spiderpoolController.prometheus.enabled=true " ; \
 		HELM_OPTION+=" --set spiderpoolAgent.prometheus.enabledDebugMetric=true --set spiderpoolController.prometheus.enabledDebugMetric=true " ; \
 		if [ -n "$(PYROSCOPE_LOCAL_PORT)" ] ; then \
@@ -257,24 +354,123 @@ setup_spiderpool:
 		HELM_OPTION+=" --set spiderpoolController.replicas=2 " ; \
 		HELM_OPTION+=" --set spiderpoolAgent.prometheus.serviceMonitor.install=true --set spiderpoolAgent.prometheus.prometheusRule.install=true --set spiderpoolAgent.prometheus.grafanaDashboard.install=true " ; \
 		HELM_OPTION+=" --set spiderpoolController.prometheus.serviceMonitor.install=true --set spiderpoolController.prometheus.prometheusRule.install=true --set spiderpoolController.prometheus.grafanaDashboard.install=true " ; \
+		HELM_OPTION+=" --set plugins.installCNI=true " ; \
+		HELM_OPTION+=" --set plugins.installOvsCNI=true " ; \
+		HELM_OPTION+=" 	--set spiderpoolAgent.image.registry="" \
+		--set spiderpoolAgent.image.repository=$(SPIDERPOOL_AGENT_IMAGE_NAME) \
+		--set spiderpoolAgent.image.tag=$(E2E_SPIDERPOOL_TAG) \
+		--set spiderpoolController.image.registry="" \
+		--set spiderpoolController.image.repository=$(SPIDERPOOL_CONTROLLER_IMAGE_NAME) \
+		--set spiderpoolController.image.tag=$(E2E_SPIDERPOOL_TAG) \
+		--set spiderpoolController.enablePodNetworkResourceInject=true \
+		--set spiderpoolInit.image.registry="" \
+		--set spiderpoolInit.image.repository=$(SPIDERPOOL_CONTROLLER_IMAGE_NAME) \
+		--set spiderpoolInit.image.tag=$(E2E_SPIDERPOOL_TAG) \
+		--set rdma.rdmaSharedDevicePlugin.image.registry=$(E2E_RDMA_DP_IMAGE_REPO) \
+		--set sriov.image.registry=$(E2E_SRIOV_IMAGE_REPO)   " \
+		ALL_IMAGES=`helm template $(RELEASE_NAME) $(ROOT_DIR)/charts/spiderpool $${HELM_OPTION} | grep ' image: ' | tr -d '"' | awk -F 'image: ' '{print $$2}' | sort | uniq | tr '\n' ' '` ; \
+		echo "ALL_IMAGES: $${ALL_IMAGES} " ; \
+		for IMAGE in $${ALL_IMAGES}; do \
+				if ! grep "$${IMAGE}" <<< `docker images | awk '{printf("%s:%s\n",$$1,$$2)}'`; then \
+						echo "==> $${IMAGE} no found, pulling...." ; \
+						docker pull $${IMAGE} ; \
+				fi ; \
+				kind load docker-image $${IMAGE}  --name $(E2E_CLUSTER_NAME); \
+		done ; \
 		echo "setup spiderpool with image $(SPIDERPOOL_AGENT_IMAGE_NAME):$(E2E_SPIDERPOOL_TAG) and $(SPIDERPOOL_CONTROLLER_IMAGE_NAME):$(E2E_SPIDERPOOL_TAG) " ; \
 		set -x ; \
 		helm upgrade --install $(RELEASE_NAME) $(ROOT_DIR)/charts/spiderpool --wait --debug \
 			-n $(RELEASE_NAMESPACE)  \
-			--set spiderpoolAgent.image.registry="" \
-			--set spiderpoolAgent.image.repository=$(SPIDERPOOL_AGENT_IMAGE_NAME) \
-			--set spiderpoolAgent.image.tag=$(E2E_SPIDERPOOL_TAG) \
-			--set spiderpoolController.image.registry="" \
-			--set spiderpoolController.image.repository=$(SPIDERPOOL_CONTROLLER_IMAGE_NAME) \
-			--set spiderpoolController.image.tag=$(E2E_SPIDERPOOL_TAG) \
-			--set spiderpoolInit.image.registry="" \
-			--set spiderpoolInit.image.repository=$(SPIDERPOOL_CONTROLLER_IMAGE_NAME) \
-			--set spiderpoolInit.image.tag=$(E2E_SPIDERPOOL_TAG) \
-			$${HELM_OPTION} \
-			--kubeconfig $(E2E_KUBECONFIG)  || { KIND_CLUSTER_NAME=$(E2E_CLUSTER_NAME) ./scripts/debugEnv.sh $(E2E_KUBECONFIG) "detail"   ; exit 1 ; } ; \
+			$${HELM_OPTION}  \
+			$(E2E_HELM_ADDITIONAL_OPTIONS) \
+			--kubeconfig $(E2E_KUBECONFIG)  || { KIND_CLUSTER_NAME=$(E2E_CLUSTER_NAME) ./scripts/debugEnv.sh $(E2E_KUBECONFIG) "detail" "$(E2E_LOG_FILE)" ; exit 1 ; } ; \
+		if [ "$(INSTALL_SRIOV)" == "true" ] ; then \
+		    echo "label node for sriov operator " ; \
+		    kubectl --kubeconfig $(E2E_KUBECONFIG) get node | sed '1d' | awk '{print $$1}' | xargs -n 1 -i kubectl --kubeconfig $(E2E_KUBECONFIG) label node {}  node-role.kubernetes.io/worker="" ; \
+		fi ; \
 		exit 0
 
+.PHONY: uninstall_spiderpool
+uninstall_spiderpool:
+	@echo -e "\033[35m [uninstall spiderpool] \033[0m"
+	@echo -e "\033[35m [helm uninstall spiderpool] \033[0m"
+	echo "=========== after test `date` ===========" >> $(E2E_UNINSTALL_LOG_FILE) ; \
+	helm uninstall $(RELEASE_NAME) --wait --debug -n $(RELEASE_NAMESPACE) \
+	     --kubeconfig $(E2E_KUBECONFIG)  || { KIND_CLUSTER_NAME=$(E2E_CLUSTER_NAME) ./scripts/debugEnv.sh $(E2E_KUBECONFIG) "detail" "$(E2E_UNINSTALL_LOG_FILE)" ; exit 1 ; } ; \
+	echo "Multus config has been cleanup successfully." ; \
+	for ((i=0; i<100; i++)); do \
+    	if ! kubectl --kubeconfig=$(E2E_KUBECONFIG) get all --all-namespaces | grep -q "spiderpool" ; then \
+			echo "All resources successfully cleared." ; \
+			exit 0; \
+		fi ;\
+		echo "found spiderpool resources, waiting..." ; \
+		sleep 1 ; \
+	done; \
+	echo "error: found spiderpool resources" ; exit 1 ;
+    @echo "check cni conf removed from nodes: $(POST_UNINSTALL_CHECK_CNI_CONF) " ; \
+		NODE_LIST=` docker ps | egrep "kindest/node.* $(E2E_CLUSTER_NAME)-(control|worker)" | awk '{print $$1 }' ` ; \
+		[ -n "$$NODE_LIST" ] || { echo "error, failed to find any kind nodes, please setup kind cluster $(E2E_CLUSTER_NAME) first" ; exit 1 ; } ; \
+		for NODE in $${NODE_LIST} ; do \
+			ALL_CONF=`docker exec $${NODE} ls /etc/cni/net.d ` || { echo "error, failed to get cni conf /etc/cni/net.d on node $${NODE} " ; exit 1 ; }; \
+			ALL_CONF=` echo "$${ALL_CONF}" | tr '\n' ' ' ` ; \
+			echo "all cni conf on node $${NODE}: $${ALL_CONF} " ; \
+			for ITEM in $(POST_UNINSTALL_CHECK_CNI_CONF) ; do \
+			     grep " $${ITEM} " <<< " $${ALL_CONF} " &>/dev/null && { echo "error, found $${ITEM} under /etc/cni/net.d on node $${NODE} " ; exit 1 ; } ; \
+			done ; \
+		done
 
+.PHONY: helm_upgrade_spiderpool
+helm_upgrade_spiderpool:
+	@echo -e "\033[35m [helm upgrade spiderpool] \033[0m"
+	HELM_OPTION="";\
+	kubectl get mutatingwebhookconfigurations spiderpool-controller -o yaml --kubeconfig $(E2E_KUBECONFIG) ;\
+	HELM_OPTION+=" --set spiderpoolController.replicas=1 " ; \
+	if [ "$(INSTALL_OVERLAY_CNI)" == "true" ]; then \
+		HELM_OPTION+=" --set multus.multusCNI.defaultCniCRName= " ; \
+	else \
+		HELM_OPTION+=" --set multus.multusCNI.defaultCniCRName=$(MULTUS_DEFAULT_CNI_VLAN0) " ; \
+	fi ; \
+	HELM_OPTION+=" 	--set spiderpoolAgent.image.registry="" \
+	--set spiderpoolAgent.image.repository=$(SPIDERPOOL_AGENT_IMAGE_NAME) \
+	--set spiderpoolAgent.image.tag=$(E2E_SPIDERPOOL_TAG) \
+	--set spiderpoolController.image.registry="" \
+	--set spiderpoolController.image.repository=$(SPIDERPOOL_CONTROLLER_IMAGE_NAME) \
+	--set spiderpoolController.image.tag=$(E2E_SPIDERPOOL_TAG) \
+	--set spiderpoolController.podResourceInject.enabled=true \
+	--set spiderpoolInit.image.registry="" \
+	--set spiderpoolInit.image.repository=$(SPIDERPOOL_CONTROLLER_IMAGE_NAME) \
+	--set spiderpoolInit.image.tag=$(E2E_SPIDERPOOL_TAG) \
+	--set multus.multusCNI.uninstall=false " ; \
+	if [ "$(E2E_SPIDERPOOL_ENABLE_SUBNET)" == "true" ] ; then \
+		HELM_OPTION+=" --set ipam.spiderSubnet.enable=true " ; \
+		HELM_OPTION+=" --set ipam.spiderSubnet.autoPool.enable=true " ; \
+		HELM_OPTION+=" --set ipam.spiderSubnet.autoPool.defaultRedundantIPNumber=1 " ; \
+	else \
+		HELM_OPTION+=" --set ipam.spiderSubnet.enable=false " ; \
+		HELM_OPTION+=" --set ipam.spiderSubnet.autoPool.enable=true " ; \
+		HELM_OPTION+=" --set ipam.spiderSubnet.autoPool.defaultRedundantIPNumber=1 " ; \
+	fi ; \
+	ALL_IMAGES=`helm template $(RELEASE_NAME) $(ROOT_DIR)/charts/spiderpool $${HELM_OPTION} | grep ' image: ' | tr -d '"' | awk -F 'image: ' '{print $$2}' | sort | uniq | tr '\n' ' '` ; \
+	echo "ALL_IMAGES: $${ALL_IMAGES} " ; \
+	for IMAGE in $${ALL_IMAGES}; do \
+			if ! grep "$${IMAGE}" <<< `docker images | awk '{printf("%s:%s\n",$$1,$$2)}'`; then \
+					echo "==> $${IMAGE} no found, pulling...." ; \
+					docker pull $${IMAGE} ; \
+			fi ; \
+			kind load docker-image $${IMAGE}  --name $(E2E_CLUSTER_NAME); \
+	done ; \
+	echo "upgrade spiderpool with image $(SPIDERPOOL_AGENT_IMAGE_NAME):$(E2E_SPIDERPOOL_TAG) and $(SPIDERPOOL_CONTROLLER_IMAGE_NAME):$(E2E_SPIDERPOOL_TAG) " ; \
+	set -x ; \
+	helm --kubeconfig $(E2E_KUBECONFIG) upgrade $(RELEASE_NAME) $(ROOT_DIR)/charts/spiderpool \
+	    $${HELM_OPTION} \
+		-n $(RELEASE_NAMESPACE) --debug --reuse-values ; \
+    cd $(ROOT_DIR)/charts/spiderpool/crds ; \
+	ls | grep '\.yaml$$' | xargs -I {} kubectl apply -f {} --kubeconfig $(E2E_KUBECONFIG) ; \
+	kubectl wait --for=condition=ready -l app.kubernetes.io/instance=spiderpool --timeout=300s pod -n $(RELEASE_NAMESPACE) --kubeconfig $(E2E_KUBECONFIG) || true; \
+	kubectl scale deploy -n $(RELEASE_NAMESPACE) -l app.kubernetes.io/component=spiderpool-controller --replicas=2 --kubeconfig $(E2E_KUBECONFIG); \
+	kubectl wait --for=condition=ready -l app.kubernetes.io/component=spiderpool-controller --timeout=300s pod -n $(RELEASE_NAMESPACE) --kubeconfig $(E2E_KUBECONFIG) || true; \
+	kubectl get mutatingwebhookconfigurations spiderpool-controller -o yaml --kubeconfig $(E2E_KUBECONFIG) ;\
+	helm --kubeconfig $(E2E_KUBECONFIG) list -A ; \
 
 .PHONY: clean
 clean:
@@ -338,6 +534,13 @@ e2e_test:
 		export RELEASE_NAMESPACE=$(RELEASE_NAMESPACE) ; \
 		export INSTALL_OVERLAY_CNI=$(INSTALL_OVERLAY_CNI) ; \
 		export E2E_SPIDERSUBNET_ENABLED=$(E2E_SPIDERPOOL_ENABLE_SUBNET) ; \
+		K8S_VERSION=` kubectl version -o json --kubeconfig $(E2E_KUBECONFIG) | jq '.serverVersion.gitVersion' ` ; \
+		echo "k8s version: $${K8S_VERSION}" ; \
+		if [ $$(echo -e "$(K8S_VERSION)\nv1.29.0" | sort -V | tail -n1) == "$(K8S_VERSION)" ] && [ "${E2E_SPIDERPOOL_ENABLE_DRA}" == "true" ]; then \
+			export E2E_SPIDERPOOL_ENABLE_DRA=true ; \
+		else \
+			export E2E_SPIDERPOOL_ENABLE_DRA=false ; \
+		fi ; \
 		rm -f $(E2E_LOG_FILE) || true  ; \
 		echo "=========== before test `date` ===========" >> $(E2E_LOG_FILE) ; \
 		./scripts/debugEnv.sh $(E2E_KUBECONFIG) "system" "$(E2E_LOG_FILE)" ; \

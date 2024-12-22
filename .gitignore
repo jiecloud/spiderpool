@@ -34,7 +34,7 @@ coverage.out
 coverage-all.out
 coverage-all.html
 coverage-all-tmp.out
-unitestreport.json
+unittestreport.json
 e2ereport.json
 
 .DS_Store
@@ -88,6 +88,8 @@ _openapi_tmp/
 
 # controller-gen tmp path
 .controller_gen_tmp
+
+docs/site.tar.gz
 
 # e2e tmp path
 test/.cluster

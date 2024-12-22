@@ -10,7 +10,7 @@ import (
 	frame "github.com/spidernet-io/e2eframework/framework"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -21,7 +21,7 @@ func GenerateExampleKruiseCloneSetYaml(name, namespace string, replica int32) *k
 			Name:      name,
 		},
 		Spec: kruisev1.CloneSetSpec{
-			Replicas: pointer.Int32(replica),
+			Replicas: ptr.To(replica),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app": name,
@@ -56,7 +56,7 @@ func GenerateExampleKruiseStatefulSetYaml(name, namespace string, replica int32)
 			Name:      name,
 		},
 		Spec: kruisev1.StatefulSetSpec{
-			Replicas: pointer.Int32(replica),
+			Replicas: ptr.To(replica),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app": name,
@@ -145,4 +145,32 @@ func DeleteKruiseStatefulSetByName(f *frame.Framework, name, namespace string, o
 		},
 	}
 	return f.DeleteResource(statefulSet, opts...)
+}
+
+func GetKruiseStatefulSet(f *frame.Framework, namespace, name string) (*kruisev1.StatefulSet, error) {
+	kruiseStatefulSet := &kruisev1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+		},
+	}
+	key := client.ObjectKeyFromObject(kruiseStatefulSet)
+	existing := &kruisev1.StatefulSet{}
+	e := f.GetResource(key, existing)
+	if e != nil {
+		return nil, e
+	}
+	return existing, e
+}
+func ScaleKruiseStatefulSet(f *frame.Framework, kruiseStatefulSet *kruisev1.StatefulSet, replicas int32) (*kruisev1.StatefulSet, error) {
+	if kruiseStatefulSet == nil {
+		return nil, errors.New("wrong input")
+	}
+
+	kruiseStatefulSet.Spec.Replicas = ptr.To(replicas)
+	err := f.UpdateResource(kruiseStatefulSet)
+	if err != nil {
+		return nil, err
+	}
+	return kruiseStatefulSet, nil
 }

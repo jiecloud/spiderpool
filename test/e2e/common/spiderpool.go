@@ -7,25 +7,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 
 	v1 "github.com/spidernet-io/spiderpool/pkg/k8s/apis/spiderpool.spidernet.io/v2beta1"
 	"github.com/spidernet-io/spiderpool/pkg/lock"
 	"github.com/spidernet-io/spiderpool/pkg/utils/convert"
+	"k8s.io/client-go/tools/cache"
 
 	"github.com/asaskevich/govalidator"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	frame "github.com/spidernet-io/e2eframework/framework"
 	"github.com/spidernet-io/e2eframework/tools"
-	"github.com/spidernet-io/spiderpool/cmd/spiderpool-agent/cmd"
 	"github.com/spidernet-io/spiderpool/pkg/constant"
 	ip "github.com/spidernet-io/spiderpool/pkg/ip"
 	"github.com/spidernet-io/spiderpool/pkg/types"
 
-	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	api_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +31,41 @@ import (
 	apitypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func GetSpiderClaimParameter(f *frame.Framework, name, ns string) (*v1.SpiderClaimParameter, error) {
+	if name == "" || f == nil {
+		return nil, errors.New("wrong input")
+	}
+
+	v := apitypes.NamespacedName{Name: name, Namespace: ns}
+	existing := &v1.SpiderClaimParameter{}
+	e := f.GetResource(v, existing)
+	if e != nil {
+		return nil, e
+	}
+	return existing, nil
+}
+
+func CreateSpiderClaimParameter(f *frame.Framework, scp *v1.SpiderClaimParameter, opts ...client.CreateOption) error {
+	if f == nil || scp == nil {
+		return fmt.Errorf("invalid parameters")
+	}
+
+	return f.CreateResource(scp, opts...)
+}
+
+func DeleteSpiderClaimParameter(f *frame.Framework, spiderClaimName, ns string, opts ...client.DeleteOption) error {
+	if spiderClaimName == "" || f == nil {
+		return errors.New("wrong input")
+	}
+	pool := &v1.SpiderClaimParameter{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      spiderClaimName,
+			Namespace: ns,
+		},
+	}
+	return f.DeleteResource(pool, opts...)
+}
 
 func CreateIppool(f *frame.Framework, ippool *v1.SpiderIPPool, opts ...client.CreateOption) error {
 	if f == nil || ippool == nil {
@@ -77,49 +110,60 @@ func BatchCreateIppoolWithSpecifiedIPNumber(frame *frame.Framework, ippoolNumber
 	var ipPoolObj *v1.SpiderIPPool
 	var iPPoolNameList []string
 	ipMap := make(map[string]string)
+	ctx, cancel := context.WithTimeout(context.Background(), BatchCreateTimeout)
+	defer cancel()
 
 OUTER_FOR:
 	// cycle create ippool
-	for i := 1; i <= ippoolNumber; i++ {
-		if isV4orv6Pool {
-			ipPoolName, ipPoolObj = GenerateExampleIpv4poolObject(ipNum)
-		} else {
-			ipPoolName, ipPoolObj = GenerateExampleIpv6poolObject(ipNum)
-		}
-		Expect(ipPoolObj.Spec.IPs).NotTo(BeNil())
-		GinkgoWriter.Printf("ipPoolObj.Spec.IPs : %v\n", ipPoolObj.Spec.IPs)
-		GinkgoWriter.Printf("ipPoolObj.Spec.IPVersion : %v\n", *ipPoolObj.Spec.IPVersion)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, errors.New("timeout waiting for desired number of ippool creations")
+		default:
+			if isV4orv6Pool {
+				ipPoolName, ipPoolObj = GenerateExampleIpv4poolObject(ipNum)
+			} else {
+				ipPoolName, ipPoolObj = GenerateExampleIpv6poolObject(ipNum)
+			}
+			Expect(ipPoolObj.Spec.IPs).NotTo(BeNil())
+			GinkgoWriter.Printf("ipPoolObj.Spec.IPs : %v\n", ipPoolObj.Spec.IPs)
+			GinkgoWriter.Printf("ipPoolObj.Spec.IPVersion : %v\n", *ipPoolObj.Spec.IPVersion)
 
-		ipslice, err := ip.ParseIPRanges(*ipPoolObj.Spec.IPVersion, ipPoolObj.Spec.IPs)
-		Expect(err).NotTo(HaveOccurred())
-		GinkgoWriter.Printf("ip segment is : %v\n", ipslice)
-		tempIPs := []string{}
-		// traversal of ips in ip segment
-		for _, ips := range ipslice {
-			// check whether the ip exists in ipMap
-			if d, isPresent := ipMap[string(ips)]; isPresent {
-				GinkgoWriter.Printf("ippool objects %v and %v have conflicted ip: %v \n", d, ipPoolName, ips)
-				i--
-				// If there is duplication in the middle, delete the dirty data
-				for _, ip := range tempIPs {
-					delete(ipMap, ip)
+			ipslice, err := ip.ParseIPRanges(*ipPoolObj.Spec.IPVersion, ipPoolObj.Spec.IPs)
+			Expect(err).NotTo(HaveOccurred())
+			GinkgoWriter.Printf("ip segment is : %v\n", ipslice)
+			tempIPs := []string{}
+			// traversal of ips in ip segment
+			for _, ips := range ipslice {
+				// check whether the ip exists in ipMap
+				if d, isPresent := ipMap[string(ips)]; isPresent {
+					GinkgoWriter.Printf("ippool objects %v and %v have conflicted ip: %v \n", d, ipPoolName, ips)
+					// If there is duplication in the middle, delete the dirty data
+					for _, ip := range tempIPs {
+						delete(ipMap, ip)
+					}
+					// continue back to OUTER_FOR to continue creating ippool
+					continue OUTER_FOR
 				}
-				// continue back to OUTER_FOR to continue creating ippool
+				tempIPs = append(tempIPs, string(ips))
+				ipMap[string(ips)] = ipPoolName
+			}
+
+			err = CreateIppool(frame, ipPoolObj)
+			if err != nil {
+				GinkgoWriter.Printf("Failed to create IPPool %v, error is %v", ipPoolName, err)
+				time.Sleep(ForcedWaitingTime)
 				continue OUTER_FOR
 			}
-			tempIPs = append(tempIPs, string(ips))
-			ipMap[string(ips)] = ipPoolName
+			GinkgoWriter.Printf("IPPool %v created successfully, current number of IP pools: %v \n", ipPoolName, len(iPPoolNameList))
+
+			iPPoolNameList = append(iPPoolNameList, ipPoolName)
+			if len(iPPoolNameList) == ippoolNumber {
+				GinkgoWriter.Printf("%v ippools successfully created \n", len(iPPoolNameList))
+				return iPPoolNameList, nil
+			}
 		}
-		errpool := CreateIppool(frame, ipPoolObj)
-		// if the created ippool is not nil ,then return err
-		if errpool != nil {
-			return nil, errpool
-		}
-		GinkgoWriter.Printf("%v-th ippool %v successfully created \n", i, ipPoolName)
-		iPPoolNameList = append(iPPoolNameList, ipPoolName)
 	}
-	GinkgoWriter.Printf("iPPool List name is: %v \n", iPPoolNameList)
-	return iPPoolNameList, nil
 }
 
 func DeleteIPPoolByName(f *frame.Framework, poolName string, opts ...client.DeleteOption) error {
@@ -311,39 +355,6 @@ func CheckPodIpRecordInIppool(f *frame.Framework, v4IppoolNameList, v6IppoolName
 	}
 }
 
-func GetClusterDefaultIppool(f *frame.Framework) (v4IppoolList, v6IppoolList []string, e error) {
-	if f == nil {
-		return nil, nil, errors.New("wrong input")
-	}
-
-	configMap, e := f.GetConfigmap(SpiderPoolConfigmapName, SpiderPoolConfigmapNameSpace)
-	if e != nil {
-		return nil, nil, e
-	}
-	GinkgoWriter.Printf("configmap: %+v \n", configMap.Data)
-
-	data, ok := configMap.Data["conf.yml"]
-	if !ok || len(data) == 0 {
-		return nil, nil, errors.New("failed to find cluster default ippool")
-	}
-
-	conf := cmd.Config{}
-	if err := yaml.Unmarshal([]byte(data), &conf); nil != err {
-		GinkgoWriter.Printf("failed to decode yaml config: %v \n", data)
-		return nil, nil, errors.New("failed to find cluster default ippool")
-	}
-	GinkgoWriter.Printf("yaml config: %v \n", conf)
-
-	if conf.EnableIPv4 && len(conf.ClusterDefaultIPv4IPPool) == 0 {
-		return nil, nil, errors.New("IPv4 IPPool is not specified when IPv4 is enabled")
-	}
-	if conf.EnableIPv6 && len(conf.ClusterDefaultIPv6IPPool) == 0 {
-		return nil, nil, errors.New("IPv6 IPPool is not specified when IPv6 is enabled")
-	}
-
-	return conf.ClusterDefaultIPv4IPPool, conf.ClusterDefaultIPv6IPPool, nil
-}
-
 func GetNamespaceDefaultIppool(f *frame.Framework, namespace string) (v4IppoolList, v6IppoolList []string, e error) {
 	ns, err := f.GetNamespace(namespace)
 	if err != nil {
@@ -435,7 +446,7 @@ func GenerateExampleIpv4poolObject(ipNum int) (string, *v1.SpiderIPPool) {
 	}
 	var v4Ipversion = new(types.IPVersion)
 	*v4Ipversion = constant.IPv4
-	var v4PoolName string = "v4pool-" + tools.RandomName()
+	var v4PoolName string = "v4pool-" + GenerateString(15, true)
 	var randomNumber1 string = GenerateRandomNumber(255)
 	var randomNumber2 string = GenerateRandomNumber(255)
 
@@ -447,21 +458,14 @@ func GenerateExampleIpv4poolObject(ipNum int) (string, *v1.SpiderIPPool) {
 			IPVersion: v4Ipversion,
 		},
 	}
-
 	if ipNum <= 253 {
-		iPv4PoolObj.Spec.Subnet = fmt.Sprintf("10.%s.%s.0/24", randomNumber1, randomNumber2)
-		if ipNum == 1 {
-			iPv4PoolObj.Spec.IPs = []string{fmt.Sprintf("10.%s.%s.2", randomNumber1, randomNumber2)}
-		} else {
-			a := strconv.Itoa(ipNum + 1)
-			iPv4PoolObj.Spec.IPs = []string{fmt.Sprintf("10.%s.%s.2-10.%s.%s.%s", randomNumber1, randomNumber2, randomNumber1, randomNumber2, a)}
-		}
+		iPv4PoolObj.Spec.Subnet = fmt.Sprintf("192.%s.%s.0/24", randomNumber1, randomNumber2)
 	} else {
-		iPv4PoolObj.Spec.Subnet = fmt.Sprintf("10.%s.0.0/16", randomNumber1)
-		a := fmt.Sprintf("%.0f", float64((ipNum+1)/256))
-		b := strconv.Itoa((ipNum + 1) % 256)
-		iPv4PoolObj.Spec.IPs = []string{fmt.Sprintf("10.%s.0.2-10.%s.%s.%s", randomNumber1, randomNumber1, a, b)}
+		iPv4PoolObj.Spec.Subnet = fmt.Sprintf("192.%s.0.0/16", randomNumber1)
 	}
+	ips, err := GenerateIPs(iPv4PoolObj.Spec.Subnet, ipNum+1)
+	Expect(err).NotTo(HaveOccurred())
+	iPv4PoolObj.Spec.IPs = ips[1:]
 	return v4PoolName, iPv4PoolObj
 }
 
@@ -473,7 +477,7 @@ func GenerateExampleIpv6poolObject(ipNum int) (string, *v1.SpiderIPPool) {
 
 	var v6Ipversion = new(types.IPVersion)
 	*v6Ipversion = constant.IPv6
-	var v6PoolName string = "v6pool-" + tools.RandomName()
+	var v6PoolName string = "v6pool-" + GenerateString(15, true)
 	var randomNumber string = GenerateString(4, true)
 
 	iPv6PoolObj := &v1.SpiderIPPool{
@@ -486,17 +490,14 @@ func GenerateExampleIpv6poolObject(ipNum int) (string, *v1.SpiderIPPool) {
 	}
 
 	if ipNum <= 253 {
-		iPv6PoolObj.Spec.Subnet = fmt.Sprintf("fd00:%s::/120", randomNumber)
+		iPv6PoolObj.Spec.Subnet = fmt.Sprintf("fd00:192:%s::/120", randomNumber)
 	} else {
-		iPv6PoolObj.Spec.Subnet = fmt.Sprintf("fd00:%s::/112", randomNumber)
+		iPv6PoolObj.Spec.Subnet = fmt.Sprintf("fd00:192:%s::/112", randomNumber)
 	}
 
-	if ipNum == 1 {
-		iPv6PoolObj.Spec.IPs = []string{fmt.Sprintf("fd00:%s::2", randomNumber)}
-	} else {
-		bStr := strconv.FormatInt(int64(ipNum+1), 16)
-		iPv6PoolObj.Spec.IPs = []string{fmt.Sprintf("fd00:%s::2-fd00:%s::%s", randomNumber, randomNumber, bStr)}
-	}
+	ips, err := GenerateIPs(iPv6PoolObj.Spec.Subnet, ipNum+1)
+	Expect(err).NotTo(HaveOccurred())
+	iPv6PoolObj.Spec.IPs = ips[1:]
 	return v6PoolName, iPv6PoolObj
 }
 
@@ -515,7 +516,7 @@ func DeleteIPPoolUntilFinish(f *frame.Framework, poolName string, ctx context.Co
 		default:
 			_, err := GetIppoolByName(f, poolName)
 			if err != nil {
-				GinkgoWriter.Printf("IPPool '%s' has been removed，error: %v", poolName, err)
+				GinkgoWriter.Printf("IPPool '%s' has been removed, error: %v", poolName, err)
 				return nil
 			}
 			time.Sleep(ForcedWaitingTime)
@@ -551,39 +552,15 @@ func BatchDeletePoolUntilFinish(f *frame.Framework, iPPoolNameList []string, ctx
 	return nil
 }
 
-func GenerateExampleIpv4Gateway() (v4Gateway string) {
-	num1 := GenerateRandomNumber(255)
-	num2 := GenerateRandomNumber(255)
-	num3 := GenerateRandomNumber(255)
-	num4 := GenerateRandomNumber(255)
-	v4Gateway = fmt.Sprintf("%s.%s.%s.%s", num1, num2, num3, num4)
-	return v4Gateway
+func GenerateRandomIPV4() string {
+	a, b, c, d := r.Intn(255), r.Intn(255), r.Intn(255), r.Intn(255)
+	return fmt.Sprintf("%d:%d:%d:%d", a, b, c, d)
 }
 
-func GenerateExampleIpv6Gateway() (v6Gateway string) {
-	num1 := GenerateRandomNumber(9999)
-	num2 := GenerateRandomNumber(9999)
-	num3 := GenerateRandomNumber(9999)
-	num4 := GenerateRandomNumber(9999)
-	v6Gateway = fmt.Sprintf("%s:%s:%s::%s", num1, num2, num3, num4)
-	return v6Gateway
-}
-
-func GenerateExampleIpv4Address() (ipv4Address string) {
-	randomNum1 := GenerateRandomNumber(255)
-	randomNum2 := GenerateRandomNumber(255)
-	randomNum3 := GenerateRandomNumber(255)
-	randomNum4 := GenerateRandomNumber(255)
-	ipv4Address = fmt.Sprintf("%s.%s.%s.%s", randomNum1, randomNum2, randomNum3, randomNum4)
-	return ipv4Address
-}
-
-func GenerateExampleIpv6Address() (ipv6Address string) {
-	randomNum1 := GenerateRandomNumber(9999)
-	randomNum2 := GenerateRandomNumber(9999)
-	randomNum3 := GenerateRandomNumber(9999)
-	ipv6Address = fmt.Sprintf("%s:%s::%s", randomNum1, randomNum2, randomNum3)
-	return ipv6Address
+func GenerateRandomIPV6() string {
+	n := make([]byte, 3)
+	r.Read(n)
+	return fmt.Sprintf("%x:%x::%x", n[0], n[1], n[2])
 }
 
 // Waiting for Ippool Status Condition By Allocated IPs meets expectations
@@ -631,7 +608,7 @@ func WaitWorkloadDeleteUntilFinish(ctx context.Context, f *frame.Framework, name
 			_, err := GetWorkloadByName(f, namespace, name)
 			if err != nil {
 				if api_errors.IsNotFound(err) {
-					GinkgoWriter.Printf("workload '%s/%s' has been removed，error: %v", namespace, name, err)
+					GinkgoWriter.Printf("workload '%s/%s' has been removed, error: %v", namespace, name, err)
 					return nil
 				}
 				return err
@@ -733,6 +710,7 @@ func CreateIppoolInSpiderSubnet(ctx context.Context, f *frame.Framework, subnetN
 
 			pool.Spec.Subnet = subnetObj.Spec.Subnet
 			pool.Spec.IPs = selectIpRanges
+			pool.Spec.Gateway = subnetObj.Spec.Gateway
 			err = CreateIppool(f, pool)
 			if err != nil {
 				// The informer of SpiderSubnet will delay synchronizing its own state information,
@@ -851,6 +829,210 @@ func WaitWebhookReady(ctx context.Context, f *frame.Framework, webhookPort strin
 				f.Log("failed to check webhook healthy, error: %v, output log is: %v ", err, string(out))
 				continue
 			}
+			return nil
+		}
+	}
+}
+
+func GetSpiderControllerEnvValue(f *frame.Framework, envName string) (string, error) {
+	deployment, err := f.GetDeployment(constant.SpiderpoolController, MultusNs)
+	if err != nil {
+		return "", fmt.Errorf("failed to get deployment: %v", err)
+	}
+
+	if len(deployment.Spec.Template.Spec.Containers) != 1 {
+		return "", fmt.Errorf("expected 1 container in the deployment, found %d", len(deployment.Spec.Template.Spec.Containers))
+	}
+
+	for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == envName {
+			return env.Value, nil
+		}
+	}
+
+	return "", fmt.Errorf("environment variable %s not found in Spiderpool Controller", envName)
+}
+
+type NetworkStatus struct {
+	Name      string   `json:"name"`
+	Interface string   `json:"interface"`
+	IPs       []string `json:"ips"`
+	MAC       string   `json:"mac"`
+	Default   bool     `json:"default"`
+}
+
+// ParsePodNetworkAnnotation parses the 'PodMultusNetworksStatus' annotation from the given Pod
+// and extracts all IP addresses associated with the Pod's network interfaces.
+func ParsePodNetworkAnnotation(f *frame.Framework, pod *corev1.Pod) ([]string, error) {
+	var podIPs []string
+
+	if pod.Annotations[PodMultusNetworksStatus] != "" {
+		var networksStatus []NetworkStatus
+
+		// Unmarshal the JSON from the annotation into a slice of NetworkStatus
+		err := json.Unmarshal([]byte(pod.Annotations[PodMultusNetworksStatus]), &networksStatus)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse IP(s) from the annotation for Multus CNI: %v", err)
+		}
+
+		for _, net := range networksStatus {
+			podIPs = append(podIPs, net.IPs...)
+		}
+	} else {
+		return nil, fmt.Errorf("network status annotation %v does not exist in pod %s/%s", PodMultusNetworksStatus, pod.Namespace, pod.Name)
+	}
+
+	return podIPs, nil
+}
+
+// CheckIppoolSanity checks the integrity and correctness of the IP pool's allocation status.
+// It ensures that each IP in the pool is:
+// 1. Allocated to a single Pod, whose UID matches the record in the IP pool.
+// 2. Correctly tracked by its associated endpoint, confirming that the Pod's UID matches the endpoint's UID.
+// 3. The actual number of IPs in use is compared against the IP pool's reported usage count to ensure consistency.
+func CheckIppoolSanity(f *frame.Framework, poolName string) error {
+	// Retrieve the IPPool by name
+	ippool, err := GetIppoolByName(f, poolName)
+	if err != nil {
+		if api_errors.IsNotFound(err) {
+			return fmt.Errorf("ippool %s does not exist", poolName)
+		}
+		return fmt.Errorf("failed to get ippool %s, error %v", poolName, err)
+	}
+
+	// Parse the allocated IPs from the IP pool status
+	poolAllocatedIPs, err := convert.UnmarshalIPPoolAllocatedIPs(ippool.Status.AllocatedIPs)
+	if err != nil {
+		return fmt.Errorf("failed to parse IPPool '%v' status AllocatedIPs, error: %v", ippool, err)
+	}
+
+	// Track the actual number of IPs in use
+	actualIPUsageCount := 0
+	isSanity := true
+	for poolIP, poolIPAllocation := range poolAllocatedIPs {
+		// The total number of assigned IP addresses
+		actualIPUsageCount++
+
+		// Split the pod NamespacedName to get the namespace and pod name
+		podNS, podName, err := cache.SplitMetaNamespaceKey(poolIPAllocation.NamespacedName)
+		if err != nil {
+			return fmt.Errorf("failed to split pod NamespacedName %s, error: %v", poolIPAllocation.NamespacedName, err)
+		}
+
+		// Retrieve the Pod object by its name and namespace
+		podYaml, err := f.GetPod(podName, podNS)
+		if err != nil {
+			if api_errors.IsNotFound(err) {
+				GinkgoLogr.Error(fmt.Errorf("the pod %s/%s in ippool %s, but pod does not exist in kubernetes", podNS, podName, poolName), "Failed")
+				isSanity = false
+				continue
+			} else {
+				return fmt.Errorf("failed to get pod %s/%s, error: %v", podNS, podName, err)
+			}
+		}
+		podNetworkIPs, err := ParsePodNetworkAnnotation(f, podYaml)
+		if err != nil {
+			return fmt.Errorf("failed to parse pod %s/%s network annotation \n pod yaml %v, \n error: %v ", podNS, podName, podYaml, err)
+		}
+
+		ipINPodCounts := 0
+		isIPExistedPod := false
+		for _, podNetworkIP := range podNetworkIPs {
+			if poolIP == podNetworkIP {
+				isIPExistedPod = true
+				ipINPodCounts++
+			}
+		}
+
+		if !isIPExistedPod {
+			isSanity = false
+			GinkgoLogr.Error(fmt.Errorf("the IP %s in ippool %s does not exist in the pod %s/%s NetworkAnnotation %v", poolIP, poolName, podNS, podName, podNetworkIPs), "Failed")
+		} else if ipINPodCounts > 1 {
+			isSanity = false
+			GinkgoLogr.Error(fmt.Errorf("the IP %s from the IPPool %s appears multiple times in the NetworkAnnotation %+v of the Pod %s/%s", poolIP, poolName, podNetworkIPs, podNS, podName), "Failed")
+		} else {
+			GinkgoWriter.Printf("The IP %s in the IPPool %s exist in the Pods %s/%s NetworkAnnotation %v and is unique. \n", poolIP, poolName, podNS, podName, podNetworkIPs)
+		}
+
+		if string(podYaml.UID) == poolIPAllocation.PodUID {
+			GinkgoWriter.Printf("Succeed: Pod %s/%s UID %s matches IPPool %s UID %s \n", podNS, podName, string(podYaml.UID), poolName, poolIPAllocation.PodUID)
+		} else {
+			isSanity = false
+			GinkgoLogr.Error(fmt.Errorf("pod %s/%s UID %s does not match the IPPool %s UID %s", podNS, podName, string(podYaml.UID), poolName, poolIPAllocation.PodUID), "Failed")
+		}
+
+		wep, err := GetWorkloadByName(f, podYaml.Namespace, podYaml.Name)
+		if err != nil {
+			if api_errors.IsNotFound(err) {
+				GinkgoLogr.Error(fmt.Errorf("pod %s/%s exists in ippool %s, but endpoint does not exist", podYaml.Namespace, podYaml.Name, poolName), "Failed")
+				isSanity = false
+				continue
+			}
+			return fmt.Errorf("pod %s/%s exists in ippool %s, but failed to get endpoint, error %v", podYaml.Namespace, podYaml.Name, poolName, err)
+		}
+
+		podUsedIPs := convert.GroupIPAllocationDetails(wep.Status.Current.UID, wep.Status.Current.IPs)
+		for tmpPoolName, tmpIPs := range podUsedIPs {
+			if tmpPoolName == poolName {
+				for idx := range tmpIPs {
+					if tmpIPs[idx].UID != poolIPAllocation.PodUID {
+						isSanity = false
+						GinkgoLogr.Error(fmt.Errorf("the UID %s recorded in IPPool %s for the Pod does not match the UID %s in the endpoint %s/%s", poolIPAllocation.PodUID, poolName, tmpIPs[idx].UID, podNS, podName), "Failed")
+					} else if tmpIPs[idx].IP != poolIP {
+						isSanity = false
+						GinkgoLogr.Error(fmt.Errorf("the IP %s recorded in IPPool %s for the Pod %s/%s does not match the IP %s in the endpoint %s/%s", poolIP, poolName, podNS, podName, tmpIPs[idx].IP, podNS, podName), "Failed")
+					} else {
+						GinkgoWriter.Printf("Succeed: The IP %s and UID %s recorded for the Pod %s/%s in IPPool %s are the same as the UID %s and IP %s in the endpoint %s/%s \n",
+							poolIP, poolIPAllocation.PodUID, podNS, podName, poolName, tmpIPs[idx].UID, tmpIPs[idx].IP, podNS, podName)
+					}
+				}
+			}
+		}
+	}
+
+	// The status of IPPool is automatically synchronized by the IPPool informer based on the events it receives.
+	// In the CI environment, the creation of IPPools happens very quickly, and their health checks are performed promptly.
+	// When checking the TotalIPCount status, if the spiderpool-controller undergoes a leader election or the informer has not yet completed synchronization,
+	// the IPPool status TotalIPCount may be nil. This can lead to a panic.
+	// In such cases, try waiting for the informer to complete status synchronization before checking the robustness of the IPPool.
+	ctx, cancel := context.WithTimeout(context.Background(), InformerSyncStatusTime)
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for informer to synchronize IPPool %s status timed out", poolName)
+		default:
+			if ippool.Status.AllocatedIPCount == nil || ippool.Status.TotalIPCount == nil {
+				GinkgoLogr.Error(fmt.Errorf("IPPool %s has nil status fields, retrying", poolName), "Failed")
+				ippool, err = GetIppoolByName(f, poolName)
+				if err != nil {
+					if api_errors.IsNotFound(err) {
+						return fmt.Errorf("ippool %s does not exist", poolName)
+					}
+					return fmt.Errorf("failed to get ippool %s, error %v", poolName, err)
+				}
+				time.Sleep(ForcedWaitingTime)
+				continue
+			}
+
+			if *ippool.Status.AllocatedIPCount > *ippool.Status.TotalIPCount {
+				GinkgoWriter.Printf(
+					"allocated IP count (%v) exceeds total IP count (%v) \n",
+					*ippool.Status.AllocatedIPCount, *ippool.Status.TotalIPCount,
+				)
+				isSanity = false
+			}
+			// Ensure that the IP pool's reported usage matches the actual usage
+			if actualIPUsageCount != int(*ippool.Status.AllocatedIPCount) {
+				GinkgoWriter.Printf("IPPool %s usage count mismatch: expected %d, got %d \n", poolName, actualIPUsageCount, *ippool.Status.AllocatedIPCount)
+				isSanity = false
+			}
+
+			if !isSanity {
+				return fmt.Errorf("IPPool %s sanity check failed", poolName)
+			}
+
+			GinkgoWriter.Printf("Successfully checked IPPool %s sanity, IPPool record information is correct \n", poolName)
 			return nil
 		}
 	}

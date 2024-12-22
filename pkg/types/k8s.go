@@ -36,7 +36,7 @@ type AnnoPodIPPoolValue struct {
 type AnnoPodIPPoolsValue []AnnoIPPoolItem
 
 type AnnoIPPoolItem struct {
-	NIC          string   `json:"interface"`
+	NIC          string   `json:"interface,omitempty"`
 	IPv4Pools    []string `json:"ipv4,omitempty"`
 	IPv6Pools    []string `json:"ipv6,omitempty"`
 	CleanGateway bool     `json:"cleangateway"`
@@ -106,4 +106,23 @@ type AutoPoolProperty struct {
 	IfName          string
 	// AnnoPoolIPNumberVal serves for AutoPool annotation to explain whether it is IP number flexible or fixed.
 	AnnoPoolIPNumberVal string
+}
+
+type SpiderpoolConfigmapConfig struct {
+	IpamUnixSocketPath                            string                  `yaml:"ipamUnixSocketPath"`
+	EnableIPv4                                    bool                    `yaml:"enableIPv4"`
+	EnableIPv6                                    bool                    `yaml:"enableIPv6"`
+	TuneSysctlConfig                              bool                    `yaml:"tuneSysctlConfig"`
+	EnableStatefulSet                             bool                    `yaml:"enableStatefulSet"`
+	EnableKubevirtStaticIP                        bool                    `yaml:"enableKubevirtStaticIP"`
+	EnableSpiderSubnet                            bool                    `yaml:"enableSpiderSubnet"`
+	EnableAutoPoolForApplication                  bool                    `yaml:"enableAutoPoolForApplication"`
+	ClusterSubnetAutoPoolDefaultRedundantIPNumber int                     `yaml:"clusterSubnetAutoPoolDefaultRedundantIPNumber"`
+	PodResourceInjectConfig                       PodResourceInjectConfig `yaml:"podResourceInject"`
+}
+
+type PodResourceInjectConfig struct {
+	Enabled           bool     `yaml:"enabled"`
+	NamespacesExclude []string `yaml:"namespacesExclude"`
+	NamespacesInclude []string `yaml:"namespacesInclude"`
 }

@@ -181,14 +181,15 @@ dev-doctor:
 
 #============ tools ====================
 
-.PHONY: update-authors
-update-authors: ## Update AUTHORS file for Cilium repository.
+update-authors:
 	@echo "Updating AUTHORS file..."
-	@echo "The following people, in alphabetical order, have either authored or signed" > AUTHORS
-	@echo "off on commits in the Cilium repository:" >> AUTHORS
-	@echo "" >> AUTHORS
-	@contrib/authorgen/authorgen.sh >> AUTHORS
-
+	@echo "The following people, in alphabetical order, have either authored or signed" > AUTHORS_TMP
+	@echo "off on commits in the Spiderpool repository:" >> AUTHORS_TMP
+	@echo "" >> AUTHORS_TMP
+	@tools/scripts/extractAuthors.sh >> AUTHORS_TMP ; \
+		(($$?==0)) || { echo "error, failed to updating AUTHORS file" && rm -rf AUTHORS_TMP && exit 1 ; } ; \
+		mv AUTHORS_TMP AUTHORS ; \
+		echo "Successfully updated AUTHORS file."
 
 .PHONY: licenses-all
 licenses-all: ## Generate file with all the License from dependencies.
@@ -273,12 +274,12 @@ check_test_label:
 		echo "each test.go is labeled right"
 
 
-.PHONY: unitest-tests
-unitest-tests: check_test_label
-	@echo "run unitest-tests"
+.PHONY: unittest-tests
+unittest-tests: check_test_label
+	@echo "run unittest-tests"
 	$(QUIET) $(ROOT_DIR)/tools/scripts/ginkgo.sh \
 		--cover --coverprofile=./coverage.out --covermode set \
-		--json-report unitestreport.json \
+		--json-report unittestreport.json \
 		-randomize-suites -randomize-all --keep-going  --timeout=1h  -p \
 		-vv  -r $(ROOT_DIR)/pkg $(ROOT_DIR)/cmd
 	$(QUIET) go tool cover -html=./coverage.out -o coverage-all.html
@@ -288,7 +289,7 @@ e2e:
 	$(QUIET) TMP=` date +%m%d%H%M%S ` ; E2E_CLUSTER_NAME="spiderpool$${TMP}" ; \
 		echo "begin e2e with cluster $${E2E_CLUSTER_NAME}" ; \
 		make build_image ; \
-		make e2e_init_underlay -e E2E_CLUSTER_NAME=$${E2E_CLUSTER_NAME} ; \
+		make e2e_init_spiderpool -e E2E_CLUSTER_NAME=$${E2E_CLUSTER_NAME} ; \
 		make e2e_test -e E2E_CLUSTER_NAME=$${E2E_CLUSTER_NAME}
 
 
@@ -305,44 +306,57 @@ e2e_init:
 		 done
 	$(QUIET)  make -C test kind-init
 
+.PHONY: setup_singleCni_macvlan
+setup_singleCni_macvlan:
+	$(QUIET)  make -C test init_env_with_release -e INSTALL_OVERLAY_CNI=false
 
-.PHONY: e2e_init_underlay
-e2e_init_underlay:
-	$(QUIET)  make e2e_init -e INSTALL_OVERLAY_CNI=false -e E2E_SPIDERPOOL_ENABLE_SUBNET=false
+.PHONY: setup_dualCni_calico
+setup_dualCni_calico:
+	$(QUIET)  make -C test init_env_with_release -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=true -e INSTALL_CILIUM=false
 
-.PHONY: e2e_init_underlay_subnet
-e2e_init_underlay_subnet:
+.PHONY: setup_dualCni_cilium
+setup_dualCni_cilium:
+	$(QUIET)  make -C test init_env_with_release -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=false -e INSTALL_CILIUM=true DISABLE_KUBE_PROXY=true
+
+.PHONY: e2e_init_spiderpool
+e2e_init_spiderpool:
 	$(QUIET)  make e2e_init -e INSTALL_OVERLAY_CNI=false -e E2E_SPIDERPOOL_ENABLE_SUBNET=true
+
+.PHONY: e2e_init_cilium_ebpfservice
+e2e_init_cilium_ebpfservice:
+	$(QUIET)  make e2e_init -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=false -e INSTALL_CILIUM=true -e DISABLE_KUBE_PROXY=true \
+	-e E2E_SPIDERPOOL_ENABLE_SUBNET=false -e INSTALL_OVS=false
 
 .PHONY: e2e_init_calico
 e2e_init_calico:
-	$(QUIET)  make e2e_init -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=true -e INSTALL_CILIUM=false -e E2E_SPIDERPOOL_ENABLE_SUBNET=false
+	$(QUIET)  make e2e_init -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=true -e INSTALL_CILIUM=false -e E2E_SPIDERPOOL_ENABLE_SUBNET=false \
+	-e E2E_SPIDERPOOL_ENABLE_DRA=true -e INSTALL_OVS=false
 
-.PHONY: e2e_init_cilium
-e2e_init_cilium:
-	$(QUIET)  make e2e_init -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=false -e INSTALL_CILIUM=true -e E2E_SPIDERPOOL_ENABLE_SUBNET=false
-
+.PHONY: e2e_init_cilium_legacyservice
+e2e_init_cilium_legacyservice:
+	$(QUIET)  make e2e_init -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=false -e INSTALL_CILIUM=true -e DISABLE_KUBE_PROXY=false \
+	-e E2E_SPIDERPOOL_ENABLE_SUBNET=false -e INSTALL_OVS=false
 
 .PHONY: e2e_test
 e2e_test:
 	$(QUIET)  make -C test e2e_test
 
-.PHONY: e2e_test_underlay
-e2e_test_underlay:
-	$(QUIET)  make e2e_test -e INSTALL_OVERLAY_CNI=false -e E2E_SPIDERPOOL_ENABLE_SUBNET=false
-
-.PHONY: e2e_test_underlay_subnet
-e2e_test_underlay_subnet:
-	$(QUIET)  make e2e_test -e INSTALL_OVERLAY_CNI=false -e E2E_SPIDERPOOL_ENABLE_SUBNET=true
+.PHONY: e2e_test_spiderpool
+e2e_test_spiderpool:
+	$(QUIET)  make e2e_test -e INSTALL_OVERLAY_CNI=false -e E2E_SPIDERPOOL_ENABLE_SUBNET=true 
 
 .PHONY: e2e_test_calico
 e2e_test_calico:
-	$(QUIET)  make e2e_test -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=true -e INSTALL_CILIUM=false -e E2E_GINKGO_LABELS=overlay
+	$(QUIET)  make e2e_test -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=true -e INSTALL_CILIUM=false -e E2E_GINKGO_LABELS=overlay,dra \
+	E2E_SPIDERPOOL_ENABLE_DRA=true 
 
-.PHONY: e2e_test_cilium
-e2e_test_cilium:
+.PHONY: e2e_test_cilium_legacyservice
+e2e_test_cilium_legacyservice:
 	$(QUIET)  make e2e_test -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=false -e INSTALL_CILIUM=true -e E2E_GINKGO_LABELS=overlay
 
+.PHONY: e2e_test_cilium_ebpfservice
+e2e_test_cilium_ebpfservice:
+	$(QUIET)  make e2e_test -e INSTALL_OVERLAY_CNI=true -e INSTALL_CALICO=false -e INSTALL_CILIUM=true DISABLE_KUBE_PROXY=true -e E2E_GINKGO_LABELS=ebpf
 
 .PHONY: preview_doc
 preview_doc: PROJECT_DOC_DIR := ${ROOT_DIR}/docs
@@ -371,11 +385,36 @@ build_doc:
 	@echo "build doc html " ; \
 		docker run --rm --name doc_builder  \
 		-v ${PROJECT_DOC_DIR}:/host/docs \
-        --entrypoint sh \
-        squidfunk/mkdocs-material:8.5.11 -c "cd /host ; cp ./docs/mkdocs.yml ./ ; mkdocs build ; cd site ; tar -czvf site.tar.gz * ; mv ${OUTPUT_TAR} ../docs/"
+                --entrypoint sh \
+                squidfunk/mkdocs-material:8.5.11 -c "cd /host && cp ./docs/mkdocs.yml ./ && mkdocs build && cd site && tar -czvf site.tar.gz * && mv ${OUTPUT_TAR} ../docs/"
 	@ [ -f "$(PROJECT_DOC_DIR)/$(OUTPUT_TAR)" ] || { echo "failed to build site to $(PROJECT_DOC_DIR)/$(OUTPUT_TAR) " ; exit 1 ; }
 	@ echo "succeeded to build site to $(PROJECT_DOC_DIR)/$(OUTPUT_TAR) "
 
+
+.PHONY: check_doc
+check_doc: PROJECT_DOC_DIR := ${ROOT_DIR}/docs
+check_doc: OUTPUT_TAR := site.tar.gz
+check_doc:
+	-docker stop doc_builder &>/dev/null
+	-docker rm doc_builder &>/dev/null
+	[ -f "docs/mkdocs.yml" ] || { echo "error, miss docs/mkdocs.yml "; exit 1 ; }
+	-@ rm -f ./docs/$(OUTPUT_TAR)
+	@echo "check doc" ; \
+	MESSAGE=`docker run --rm --name doc_builder  \
+		-v ${PROJECT_DOC_DIR}:/host/docs \
+                --entrypoint sh \
+                squidfunk/mkdocs-material:8.5.11 -c "cd /host && cp ./docs/mkdocs.yml ./ && mkdocs build 2>&1 && cd site && tar -czvf site.tar.gz * && mv ${OUTPUT_TAR} ../docs/" 2>&1` ; \
+        if (( $$? !=0 )) ; then \
+        	echo "!!! error, failed to build doc" ; \
+        	exit 1 ; \
+        fi ; \
+        if grep -E "WARNING .* which is not found" <<< "$${MESSAGE}" ; then  \
+        	echo "!!! error, some link is bad" ; \
+        	exit 1 ; \
+        fi
+	@ [ -f "$(PROJECT_DOC_DIR)/$(OUTPUT_TAR)" ] || { echo "failed to build site to $(PROJECT_DOC_DIR)/$(OUTPUT_TAR) " ; exit 1 ; }
+	-@ rm -f ./docs/$(OUTPUT_TAR)
+	@ echo "all doc is ok "
 
 # ==========================
 
@@ -389,6 +428,14 @@ clean: clean_e2e
 	-$(QUIET) for i in $(SUBDIRS); do $(MAKE) $(SUBMAKEOPTS) -C $$i clean; done
 	-$(QUIET) rm -rf $(DESTDIR_BIN)
 	-$(QUIET) rm -rf $(DESTDIR_BASH_COMPLETION)
+
+.PHONY: clean_e2e_spiderpool
+clean_e2e_spiderpool:
+	$(QUIET) make -C test uninstall_spiderpool
+
+.PHONY: upgrade_e2e_spiderpool
+upgrade_e2e_spiderpool:
+	$(QUIET) make -C test helm_upgrade_spiderpool
 
 .PHONY: codegen
 codegen:
@@ -450,3 +497,8 @@ lint_chart_trivy:
           aquasec/trivy:$(TRIVY_VERSION) config --exit-code 1  --severity $(LINT_TRIVY_SEVERITY_LEVEL) /tmp/src/charts  ; \
       (($$?==0)) || { echo "error, failed to check chart trivy" && exit 1 ; } ; \
       echo "chart trivy check: pass"
+
+
+.PHONY: build-chart
+build-chart:
+	@ cd charts ; make

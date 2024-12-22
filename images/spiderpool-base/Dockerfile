@@ -3,13 +3,13 @@
 
 # docker buildx build -t testbase:latest --platform=linux/arm64,linux/amd64 --output type=docker .
 
-ARG GOLANG_IMAGE=docker.io/library/golang:1.20@sha256:f69d47fedd3b2ebd23bcf473c0b78522ebbc1823f06b7d47f45f04a30bdc901d
+ARG GOLANG_IMAGE=docker.io/library/golang:1.23.3@sha256:73f06be4578c9987ce560087e2e2ea6485fb605e3910542cadd8fa09fc5f3e31
 ARG UBUNTU_IMAGE=docker.io/library/ubuntu:20.04@sha256:bea6d19168bbfd6af8d77c2cc3c572114eb5d113e6f422573c93cb605a0e2ffb
 
 
 
 #========= build gops ===============
-FROM --platform=${BUILDPLATFORM} ${GOLANG_IMAGE} as gops-cni-builder
+FROM --platform=${BUILDPLATFORM} ${GOLANG_IMAGE} AS gops-cni-builder
 COPY /build-gops.sh /build-gops.sh
 
 #use alibaba debian source
@@ -25,7 +25,7 @@ RUN chmod +x /build-gops.sh && /build-gops.sh
 
 
 #========== root image ==============
-FROM ${UBUNTU_IMAGE} as rootfs
+FROM ${UBUNTU_IMAGE} AS rootfs
 COPY /install-others.sh /install-others.sh
 COPY /configure-iptables-wrapper.sh /configure-iptables-wrapper.sh
 COPY /iptables-wrapper /usr/sbin/iptables-wrapper

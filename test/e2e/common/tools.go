@@ -28,7 +28,7 @@ func GenerateString(lenNum int, isHex bool) string {
 	var chars []string
 	chars = []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0"}
 	if isHex {
-		chars = []string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"}
+		chars = []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"}
 	}
 	str := strings.Builder{}
 	length := len(chars)
@@ -128,4 +128,18 @@ func SelectIpFromIps(version types.IPVersion, ips []net.IP, ipNum int) ([]string
 		return nil, err
 	}
 	return ipRanges, nil
+}
+
+// GenerateRandomNumbers Given a number and a specified count of sub-numbers,
+// generate the specified number of sub-numbers by randomly partitioning the given number.
+func GenerateRandomNumbers(sum, user int) []int {
+	numbers := make([]int, user)
+
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	for i := 0; i < user-1; i++ {
+		numbers[i] = r.Intn(sum)
+		sum -= numbers[i]
+	}
+	numbers[user-1] += sum
+	return numbers
 }

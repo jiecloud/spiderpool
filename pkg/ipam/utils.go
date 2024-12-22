@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -160,4 +161,67 @@ func isPoolIPsDesired(pool *spiderpoolv2beta1.SpiderIPPool, desiredIPCount int) 
 	}
 
 	return false
+}
+
+func IsMultipleNicWithNoName(anno map[string]string) bool {
+	annoVal, ok := anno[constant.AnnoPodIPPools]
+	if !ok {
+		return false
+	}
+
+	var annoPodIPPools types.AnnoPodIPPoolsValue
+	err := json.Unmarshal([]byte(annoVal), &annoPodIPPools)
+	if nil != err {
+		return false
+	}
+	if len(annoPodIPPools) == 0 {
+		return false
+	}
+
+	result := false
+	for _, v := range annoPodIPPools {
+		if v.NIC == "" {
+			result = true
+		}
+	}
+
+	return result
+}
+
+func validateAndMutateMultipleNICAnnotations(annoIPPoolsValue types.AnnoPodIPPoolsValue, currentNIC string) error {
+	if len(annoIPPoolsValue) == 0 {
+		return fmt.Errorf("value requires at least one item")
+	}
+
+	nicSet := map[string]struct{}{}
+	hasNIC := annoIPPoolsValue[0].NIC != ""
+	for index := range annoIPPoolsValue {
+		// require all item NIC should be same in specified or unspecified.
+		if (annoIPPoolsValue[index].NIC != "") != hasNIC {
+			return fmt.Errorf("NIC should be either all specified or all unspecified")
+		}
+
+		// once we met the unspecified NIC in multiple NIC with no name specified mode, we give it an index name.
+		// since the latter allocation will be executed in concurrency for all NICs in the first cmdAdd,
+		// we could sort the allocation results in sequence by the NIC name.
+		if annoIPPoolsValue[index].NIC == "" {
+			annoIPPoolsValue[index].NIC = strconv.Itoa(index)
+		}
+
+		// require no NIC name duplicated, this works for multiple NIC specified by the users
+		if _, ok := nicSet[annoIPPoolsValue[index].NIC]; !ok {
+			nicSet[annoIPPoolsValue[index].NIC] = struct{}{}
+		} else {
+			return fmt.Errorf("duplicate interface %s", annoIPPoolsValue[index].NIC)
+		}
+	}
+
+	if hasNIC {
+		_, ok := nicSet[currentNIC]
+		if !ok {
+			return fmt.Errorf("interface %s must be specified", currentNIC)
+		}
+	}
+
+	return nil
 }

@@ -16,7 +16,7 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/version"
 	"github.com/go-openapi/strfmt"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	"github.com/spidernet-io/spiderpool/api/v1/agent/models"
 	"github.com/spidernet-io/spiderpool/pkg/logutils"
@@ -25,16 +25,18 @@ import (
 var (
 	defaultLogPath          = "/var/log/spidernet/coordinator.log"
 	defaultUnderlayVethName = "veth0"
+	defaultMarkBit          = 0 // ox1
 	// by default, k8s pod's first NIC is eth0
-	defaultOverlayVethName = "eth0"
-	defaultPodRuleTable    = 100
-	defaultNICPrefix       = "net"
-	BinNamePlugin          = filepath.Base(os.Args[0])
+	defaultOverlayVethName  = "eth0"
+	defaultPodRuleTable     = 100
+	defaultHostRulePriority = 1000
+	BinNamePlugin           = filepath.Base(os.Args[0])
 )
 
 type Mode string
 
 const (
+	ModeAuto     Mode = "auto"
 	ModeUnderlay Mode = "underlay"
 	ModeOverlay  Mode = "overlay"
 	ModeDisable  Mode = "disable"
@@ -42,19 +44,21 @@ const (
 
 type Config struct {
 	types.NetConf
-	OnlyHardware       bool           `json:"onlyHardware,omitempty"`
 	DetectGateway      *bool          `json:"detectGateway,omitempty"`
+	VethLinkAddress    string         `json:"vethLinkAddress,omitempty"`
 	MacPrefix          string         `json:"podMACPrefix,omitempty"`
-	InterfacePrefix    string         `json:"ifacePrefix,omitempty"`
-	PodFirstInterface  string         `json:"podDefaultInterface,omitempty"`
-	ClusterCIDR        []string       `json:"podCIDR,omitempty"`
+	MultusNicPrefix    string         `json:"multusNicPrefix,omitempty"`
+	PodDefaultCniNic   string         `json:"podDefaultCniNic,omitempty"`
+	OverlayPodCIDR     []string       `json:"overlayPodCIDR,omitempty"`
 	ServiceCIDR        []string       `json:"serviceCIDR,omitempty"`
-	ExtraCIDR          []string       `json:"extraCIDR,omitempty"`
+	HijackCIDR         []string       `json:"hijackCIDR,omitempty"`
 	TunePodRoutes      *bool          `json:"tunePodRoutes,omitempty"`
 	PodDefaultRouteNIC string         `json:"podDefaultRouteNic,omitempty"`
-	TuneMode           Mode           `json:"tuneMode,omitempty"`
+	Mode               Mode           `json:"mode,omitempty"`
 	HostRuleTable      *int64         `json:"hostRuleTable,omitempty"`
-	RPFilter           int32          `json:"hostRPFilter,omitempty" `
+	HostRPFilter       *int32         `json:"hostRPFilter,omitempty" `
+	PodRPFilter        *int32         `json:"podRPFilter,omitempty" `
+	TxQueueLen         *int64         `json:"txQueueLen,omitempty"`
 	IPConflict         *bool          `json:"detectIPConflict,omitempty"`
 	DetectOptions      *DetectOptions `json:"detectOptions,omitempty"`
 	LogOptions         *LogOptions    `json:"logOptions,omitempty"`
@@ -102,12 +106,8 @@ func ParseConfig(stdin []byte, coordinatorConfig *models.CoordinatorConfig) (*Co
 		return nil, err
 	}
 
-	if conf.PodFirstInterface == "" {
-		conf.PodFirstInterface = defaultOverlayVethName
-	}
-
-	if conf.InterfacePrefix == "" {
-		conf.InterfacePrefix = defaultNICPrefix
+	if conf.PodDefaultCniNic == "" {
+		conf.PodDefaultCniNic = defaultOverlayVethName
 	}
 
 	if conf.LogOptions == nil {
@@ -138,12 +138,12 @@ func ParseConfig(stdin []byte, coordinatorConfig *models.CoordinatorConfig) (*Co
 	}
 
 	// value must be -1,0/1/2
-	if err = validateRPFilterConfig(conf.RPFilter); err != nil {
+	if conf.PodRPFilter, err = validateRPFilterConfig(conf.PodRPFilter, coordinatorConfig.PodRPFilter); err != nil {
 		return nil, err
 	}
 
 	if conf.IPConflict == nil && coordinatorConfig.DetectIPConflict {
-		conf.IPConflict = pointer.Bool(true)
+		conf.IPConflict = ptr.To(true)
 	}
 
 	conf.DetectOptions, err = ValidateDelectOptions(conf.DetectOptions)
@@ -152,29 +152,36 @@ func ParseConfig(stdin []byte, coordinatorConfig *models.CoordinatorConfig) (*Co
 	}
 
 	if conf.HostRuleTable == nil && coordinatorConfig.HostRuleTable > 0 {
-		conf.HostRuleTable = pointer.Int64(coordinatorConfig.HostRuleTable)
+		conf.HostRuleTable = ptr.To(coordinatorConfig.HostRuleTable)
+	}
+
+	if conf.TxQueueLen == nil {
+		conf.TxQueueLen = ptr.To(coordinatorConfig.TxQueueLen)
 	}
 
 	if conf.HostRuleTable == nil {
-		conf.HostRuleTable = pointer.Int64(500)
+		conf.HostRuleTable = ptr.To(int64(500))
 	}
 
 	if conf.DetectGateway == nil {
-		conf.DetectGateway = pointer.Bool(coordinatorConfig.DetectGateway)
+		conf.DetectGateway = ptr.To(coordinatorConfig.DetectGateway)
 	}
 
 	if conf.TunePodRoutes == nil {
 		conf.TunePodRoutes = coordinatorConfig.TunePodRoutes
 	}
 
-	if conf.TuneMode == "" {
-		conf.TuneMode = Mode(*coordinatorConfig.TuneMode)
+	if conf.Mode == "" {
+		conf.Mode = Mode(*coordinatorConfig.Mode)
 	}
 
 	if conf.PodDefaultRouteNIC == "" && coordinatorConfig.PodDefaultRouteNIC != "" {
 		conf.PodDefaultRouteNIC = coordinatorConfig.PodDefaultRouteNIC
 	}
 
+	if conf.VethLinkAddress == "" {
+		conf.VethLinkAddress = coordinatorConfig.VethLinkAddress
+	}
 	return &conf, nil
 }
 
@@ -199,12 +206,12 @@ func ValidateRoutes(conf *Config, coordinatorConfig *models.CoordinatorConfig) e
 		conf.ServiceCIDR = coordinatorConfig.ServiceCIDR
 	}
 
-	if len(conf.ClusterCIDR) == 0 {
-		conf.ClusterCIDR = coordinatorConfig.PodCIDR
+	if len(conf.OverlayPodCIDR) == 0 {
+		conf.OverlayPodCIDR = coordinatorConfig.OverlayPodCIDR
 	}
 
-	if len(conf.ExtraCIDR) == 0 {
-		conf.ExtraCIDR = coordinatorConfig.ExtraCIDR
+	if len(conf.HijackCIDR) == 0 {
+		conf.HijackCIDR = coordinatorConfig.HijackCIDR
 	}
 
 	var err error
@@ -213,12 +220,12 @@ func ValidateRoutes(conf *Config, coordinatorConfig *models.CoordinatorConfig) e
 		return err
 	}
 
-	err = validateRoutes(conf.ClusterCIDR)
+	err = validateRoutes(conf.OverlayPodCIDR)
 	if err != nil {
 		return err
 	}
 
-	err = validateRoutes(conf.ExtraCIDR)
+	err = validateRoutes(conf.HijackCIDR)
 	if err != nil {
 		return err
 	}
@@ -240,26 +247,35 @@ func validateRoutes(routes []string) error {
 	return nil
 }
 
-func validateRPFilterConfig(rpfilter int32) error {
+func validateRPFilterConfig(rpfilter *int32, coordinatorConfig int64) (*int32, error) {
+	if rpfilter == nil {
+		rpfilter = ptr.To(int32(coordinatorConfig))
+	}
+
 	found := false
-	// NOTE: -1 means disable
-	for _, value := range []int32{-1, 0, 1, 2} {
-		if rpfilter == value {
-			found = true
-			break
+	// NOTE: negative number means disable
+	if *rpfilter >= 0 {
+		for _, value := range []int32{0, 1, 2} {
+			if *rpfilter == value {
+				found = true
+				break
+			}
 		}
+	} else {
+		found = true
 	}
+
 	if !found {
-		return fmt.Errorf("invalid rp_filter value %v, available options: [-1,0,1,2]", rpfilter)
+		return nil, fmt.Errorf("invalid rp_filter value %v, available options: [-1,0,1,2]", rpfilter)
 	}
-	return nil
+	return rpfilter, nil
 }
 
 func ValidateDelectOptions(config *DetectOptions) (*DetectOptions, error) {
 	if config == nil {
 		return &DetectOptions{
 			Interval: "1s",
-			TimeOut:  "1s",
+			TimeOut:  "3s",
 			Retry:    3,
 		}, nil
 	}
@@ -273,7 +289,7 @@ func ValidateDelectOptions(config *DetectOptions) (*DetectOptions, error) {
 	}
 
 	if config.TimeOut == "" {
-		config.TimeOut = "1s"
+		config.TimeOut = "3s"
 	}
 
 	_, err := time.ParseDuration(config.Interval)

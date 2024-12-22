@@ -7,21 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strconv"
 	"sync"
 	"time"
 
 	. "github.com/onsi/gomega"
-	"github.com/spidernet-io/spiderpool/cmd/spiderpool-agent/cmd"
 	"github.com/spidernet-io/spiderpool/pkg/constant"
 	"github.com/spidernet-io/spiderpool/pkg/lock"
 	"github.com/spidernet-io/spiderpool/pkg/utils/convert"
-	"gopkg.in/yaml.v3"
 
 	ip "github.com/spidernet-io/spiderpool/pkg/ip"
 	spiderpool "github.com/spidernet-io/spiderpool/pkg/k8s/apis/spiderpool.spidernet.io/v2beta1"
 	"github.com/spidernet-io/spiderpool/pkg/types"
-	"k8s.io/utils/pointer"
 
 	. "github.com/onsi/ginkgo/v2"
 	frame "github.com/spidernet-io/e2eframework/framework"
@@ -29,81 +25,93 @@ import (
 	api_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func GenerateExampleV4SubnetObject(ipNum int) (string, *spiderpool.SpiderSubnet) {
+var usedSubnetsLock = new(lock.Mutex)
+
+func GenerateExampleV4SubnetObject(f *frame.Framework, ipNum int) (string, *spiderpool.SpiderSubnet) {
+	usedSubnetsLock.Lock()
+	defer usedSubnetsLock.Unlock()
+
 	if ipNum < 1 || ipNum > 65533 {
 		GinkgoWriter.Println("the IP range should be between 1 and 65533")
 		Fail("the IP range should be between 1 and 65533")
 	}
-	subnetName := "v4-ss-" + tools.RandomName()
-	randNum1 := GenerateRandomNumber(255)
-	randNum2 := GenerateRandomNumber(255)
-
-	subnetObj := &spiderpool.SpiderSubnet{
+	subnetName := "v4-ss-" + GenerateString(15, true)
+	newSubnetObj := &spiderpool.SpiderSubnet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: subnetName,
 		},
 		Spec: spiderpool.SubnetSpec{
-			IPVersion: pointer.Int64(4),
+			IPVersion: ptr.To(int64(4)),
 		},
 	}
-	if ipNum <= 253 {
-		gateway := fmt.Sprintf("10.%s.%s.1", randNum1, randNum2)
-		subnetObj.Spec.Gateway = &gateway
-		subnetObj.Spec.Subnet = fmt.Sprintf("10.%s.%s.0/24", randNum1, randNum2)
-		if ipNum == 1 {
-			subnetObj.Spec.IPs = []string{fmt.Sprintf("10.%s.%s.2", randNum1, randNum2)}
+
+	for i := 0; i < 5; i++ {
+		randNum1 := GenerateRandomNumber(255)
+		randNum2 := GenerateRandomNumber(255)
+		if ipNum <= 253 {
+			newSubnetObj.Spec.Subnet = fmt.Sprintf("192.%s.%s.0/24", randNum1, randNum2)
 		} else {
-			a := strconv.Itoa(ipNum + 1)
-			subnetObj.Spec.IPs = []string{fmt.Sprintf("10.%s.%s.2-10.%s.%s.%s", randNum1, randNum2, randNum1, randNum2, a)}
+			newSubnetObj.Spec.Subnet = fmt.Sprintf("192.%s.0.0/16", randNum1)
 		}
-	} else {
-		gateway := fmt.Sprintf("10.%s.0.1", randNum1)
-		subnetObj.Spec.Gateway = &gateway
-		subnetObj.Spec.Subnet = fmt.Sprintf("10.%s.0.0/16", randNum1)
-		a := fmt.Sprintf("%.0f", float64((ipNum+1)/256))
-		b := strconv.Itoa((ipNum + 1) % 256)
-		subnetObj.Spec.IPs = []string{fmt.Sprintf("10.%s.0.2-10.%s.%s.%s", randNum1, randNum2, a, b)}
+		oldSubnets, _ := GetAllSubnet(f)
+		for _, oldSubnet := range oldSubnets.Items {
+			if newSubnetObj.Spec.Subnet == oldSubnet.Spec.Subnet {
+				GinkgoWriter.Printf("Subnet %s overlaps with subnet %s, the overlapping subnet is: %v \n", newSubnetObj.Name, oldSubnet.Name, newSubnetObj.Spec.Subnet)
+				break
+			}
+		}
 	}
-	return subnetName, subnetObj
+	ips, err := GenerateIPs(newSubnetObj.Spec.Subnet, ipNum+1)
+	Expect(err).NotTo(HaveOccurred())
+	gateway := ips[0]
+	newSubnetObj.Spec.Gateway = &gateway
+	newSubnetObj.Spec.IPs = ips[1:]
+	return subnetName, newSubnetObj
 }
 
-func GenerateExampleV6SubnetObject(ipNum int) (string, *spiderpool.SpiderSubnet) {
+func GenerateExampleV6SubnetObject(f *frame.Framework, ipNum int) (string, *spiderpool.SpiderSubnet) {
+	usedSubnetsLock.Lock()
+	defer usedSubnetsLock.Unlock()
+
 	if ipNum < 1 || ipNum > 65533 {
 		GinkgoWriter.Println("the IP range should be between 1 and 65533")
 		Fail("the IP range should be between 1 and 65533")
 	}
 
-	subnetName := "v6-ss-" + tools.RandomName()
-	randNum := GenerateString(4, true)
-	subnetObj := &spiderpool.SpiderSubnet{
+	subnetName := "v6-ss-" + GenerateString(15, true)
+	newSubnetObj := &spiderpool.SpiderSubnet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: subnetName,
 		},
 		Spec: spiderpool.SubnetSpec{
-			IPVersion: pointer.Int64(6),
+			IPVersion: ptr.To(int64(6)),
 		},
 	}
-
-	if ipNum <= 253 {
-		gateway := fmt.Sprintf("fd00:%s::1", randNum)
-		subnetObj.Spec.Gateway = &gateway
-		subnetObj.Spec.Subnet = fmt.Sprintf("fd00:%s::/120", randNum)
-	} else {
-		gateway := fmt.Sprintf("fd00:%s::1", randNum)
-		subnetObj.Spec.Gateway = &gateway
-		subnetObj.Spec.Subnet = fmt.Sprintf("fd00:%s::/112", randNum)
+	for i := 0; i < 5; i++ {
+		randNum := GenerateString(4, true)
+		if ipNum <= 253 {
+			newSubnetObj.Spec.Subnet = fmt.Sprintf("fd00:192:%s::/120", randNum)
+		} else {
+			newSubnetObj.Spec.Subnet = fmt.Sprintf("fd00:192:%s::/112", randNum)
+		}
+		oldSubnets, _ := GetAllSubnet(f)
+		for _, oldSubnet := range oldSubnets.Items {
+			if newSubnetObj.Spec.Subnet == oldSubnet.Spec.Subnet {
+				GinkgoWriter.Printf("Subnet %s overlaps with subnet %s, the overlapping subnet is: %v \n", newSubnetObj.Name, oldSubnet.Name, newSubnetObj.Spec.Subnet)
+				break
+			}
+		}
 	}
-
-	if ipNum == 1 {
-		subnetObj.Spec.IPs = []string{fmt.Sprintf("fd00:%s::2", randNum)}
-	} else {
-		bStr := strconv.FormatInt(int64(ipNum+1), 16)
-		subnetObj.Spec.IPs = []string{fmt.Sprintf("fd00:%s::2-fd00:%s::%s", randNum, randNum, bStr)}
-	}
-	return subnetName, subnetObj
+	ips, err := GenerateIPs(newSubnetObj.Spec.Subnet, ipNum+1)
+	Expect(err).NotTo(HaveOccurred())
+	gateway := ips[0]
+	newSubnetObj.Spec.Gateway = &gateway
+	newSubnetObj.Spec.IPs = ips[1:]
+	return subnetName, newSubnetObj
 }
 
 func CreateSubnet(f *frame.Framework, subnet *spiderpool.SpiderSubnet, opts ...client.CreateOption) error {
@@ -370,8 +378,7 @@ LOOP:
 							return err
 						}
 
-						diffIps := ip.IPsDiffSet(ips1, ips2, false)
-						if diffIps != nil {
+						if ip.IsDiffIPSet(ips1, ips2) {
 							GinkgoWriter.Printf("inconsistent ip records in subnet %v/%v and pool %v/%v \n", subnetName, ips2, pool.Name, ips1)
 							continue LOOP
 						}
@@ -401,9 +408,9 @@ func BatchCreateSubnet(f *frame.Framework, version types.IPVersion, subnetNums, 
 OUTER_FOR:
 	for i := 1; i <= subnetNums; i++ {
 		if version == constant.IPv4 {
-			subnetName, subnetObject = GenerateExampleV4SubnetObject(subnetIpNums)
+			subnetName, subnetObject = GenerateExampleV4SubnetObject(f, subnetIpNums)
 		} else {
-			subnetName, subnetObject = GenerateExampleV6SubnetObject(subnetIpNums)
+			subnetName, subnetObject = GenerateExampleV6SubnetObject(f, subnetIpNums)
 		}
 
 		if d, ok := CirdMap[subnetObject.Spec.Subnet]; ok {
@@ -435,35 +442,15 @@ OUTER_FOR:
 	return subnetNameList, nil
 }
 
-func GetClusterDefaultSubnet(f *frame.Framework) (v4SubnetList, v6SubnetList []string, e error) {
+func GetAllSubnet(f *frame.Framework, opts ...client.ListOption) (*spiderpool.SpiderSubnetList, error) {
 	if f == nil {
-		return nil, nil, errors.New("wrong input")
+		return nil, errors.New("wrong input")
 	}
 
-	configMap, e := f.GetConfigmap(SpiderPoolConfigmapName, SpiderPoolConfigmapNameSpace)
+	v := &spiderpool.SpiderSubnetList{}
+	e := f.ListResource(v, opts...)
 	if e != nil {
-		return nil, nil, e
+		return nil, e
 	}
-	GinkgoWriter.Printf("configmap: %+v \n", configMap.Data)
-
-	data, ok := configMap.Data["conf.yml"]
-	if !ok || len(data) == 0 {
-		return nil, nil, errors.New("failed to find cluster default subnet")
-	}
-
-	conf := cmd.Config{}
-	if err := yaml.Unmarshal([]byte(data), &conf); nil != err {
-		GinkgoWriter.Printf("failed to decode yaml config: %v \n", data)
-		return nil, nil, errors.New("failed to find cluster default subnet")
-	}
-	GinkgoWriter.Printf("yaml config: %v \n", conf)
-
-	if conf.EnableIPv4 && len(conf.ClusterDefaultIPv4Subnet) != 0 {
-		v4SubnetList = conf.ClusterDefaultIPv4Subnet
-	}
-	if conf.EnableIPv6 && len(conf.ClusterDefaultIPv6Subnet) != 0 {
-		v6SubnetList = conf.ClusterDefaultIPv6Subnet
-	}
-
-	return v4SubnetList, v6SubnetList, nil
+	return v, nil
 }

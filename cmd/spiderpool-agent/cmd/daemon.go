@@ -16,16 +16,21 @@ import (
 	"time"
 
 	"github.com/google/gops/agent"
-	"github.com/pyroscope-io/client/pyroscope"
+	"github.com/grafana/pyroscope-go"
+	"go.uber.org/automaxprocs/maxprocs"
+	"go.uber.org/zap"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/spidernet-io/spiderpool/pkg/ipam"
 	"github.com/spidernet-io/spiderpool/pkg/ippoolmanager"
+	"github.com/spidernet-io/spiderpool/pkg/kubevirtmanager"
 	"github.com/spidernet-io/spiderpool/pkg/logutils"
 	"github.com/spidernet-io/spiderpool/pkg/namespacemanager"
+	"github.com/spidernet-io/spiderpool/pkg/networking/sysctl"
 	"github.com/spidernet-io/spiderpool/pkg/nodemanager"
 	"github.com/spidernet-io/spiderpool/pkg/openapi"
 	"github.com/spidernet-io/spiderpool/pkg/podmanager"
@@ -59,18 +64,28 @@ func DaemonMain() {
 	}
 
 	// Set golang max procs.
-	currentP := runtime.GOMAXPROCS(-1)
-	logger.Sugar().Infof("Default max golang procs: %d", currentP)
-	if currentP > int(agentContext.Cfg.GoMaxProcs) {
-		p := runtime.GOMAXPROCS(int(agentContext.Cfg.GoMaxProcs))
-		logger.Sugar().Infof("Change max golang procs to %d", p)
+	if _, err := maxprocs.Set(
+		maxprocs.Logger(func(s string, i ...interface{}) {
+			logger.Sugar().Infof(s, i...)
+		}),
+	); err != nil {
+		logger.Sugar().Warn("failed to set GOMAXPROCS")
 	}
 
 	// Load spiderpool's global Comfigmap.
 	if err := agentContext.LoadConfigmap(); err != nil {
-		logger.Sugar().Fatal("Failed to load Configmap spiderpool-conf: %v", err)
+		logger.Sugar().Fatalf("Failed to load Configmap spiderpool-conf: %v", err)
 	}
 	logger.Sugar().Infof("Spiderpool-agent config: %+v", agentContext.Cfg)
+
+	// setup sysctls
+	if agentContext.Cfg.TuneSysctlConfig {
+		if err := sysctlConfig(agentContext.Cfg.EnableIPv4, agentContext.Cfg.EnableIPv6); err != nil {
+			logger.Sugar().Fatal(err)
+		}
+	} else {
+		logger.Sugar().Infof("setSysctlConfig is disabled.")
+	}
 
 	// Set up gops.
 	if agentContext.Cfg.GopsListenPort != "" {
@@ -93,6 +108,10 @@ func DaemonMain() {
 		if e != nil || len(node) == 0 {
 			logger.Sugar().Fatalf("Failed to get hostname: %v", e)
 		}
+
+		// These 2 lines are only required if you're using mutex or block profiling
+		runtime.SetMutexProfileFraction(5)
+		runtime.SetBlockProfileRate(5)
 		_, e = pyroscope.Start(pyroscope.Config{
 			ApplicationName: binNameAgent,
 			ServerAddress:   agentContext.Cfg.PyroscopeAddress,
@@ -104,6 +123,12 @@ func DaemonMain() {
 				pyroscope.ProfileAllocSpace,
 				pyroscope.ProfileInuseObjects,
 				pyroscope.ProfileInuseSpace,
+				// additional
+				pyroscope.ProfileGoroutines,
+				pyroscope.ProfileMutexCount,
+				pyroscope.ProfileMutexDuration,
+				pyroscope.ProfileBlockCount,
+				pyroscope.ProfileBlockDuration,
 			},
 		})
 		if e != nil {
@@ -116,9 +141,6 @@ func DaemonMain() {
 		logger.Fatal(err.Error())
 	}
 
-	logger.Info("Begin to initialize spiderpool-agent metrics HTTP server")
-	initAgentMetricsServer(agentContext.InnerCtx)
-
 	logger.Info("Begin to initialize spiderpool-agent runtime manager")
 	mgr, err := newCRDManager()
 	if nil != err {
@@ -126,22 +148,34 @@ func DaemonMain() {
 	}
 	agentContext.CRDManager = mgr
 
+	logger.Info("Begin to initialize k8s clientSet")
+	clientSet, err := kubernetes.NewForConfig(ctrl.GetConfigOrDie())
+	if nil != err {
+		logger.Sugar().Fatalf("failed to init K8s clientset: %v", err)
+	}
+	agentContext.ClientSet = clientSet
+
+	logger.Info("Begin to initialize spiderpool-agent metrics HTTP server")
+	initAgentMetricsServer(agentContext.InnerCtx)
+
 	// init managers...
 	initAgentServiceManagers(agentContext.InnerCtx)
 
 	logger.Info("Begin to initialize IPAM")
 	ipamConfig := ipam.IPAMConfig{
-		EnableIPv4:               agentContext.Cfg.EnableIPv4,
-		EnableIPv6:               agentContext.Cfg.EnableIPv6,
-		ClusterDefaultIPv4IPPool: agentContext.Cfg.ClusterDefaultIPv4IPPool,
-		ClusterDefaultIPv6IPPool: agentContext.Cfg.ClusterDefaultIPv6IPPool,
-		EnableSpiderSubnet:       agentContext.Cfg.EnableSpiderSubnet,
-		EnableStatefulSet:        agentContext.Cfg.EnableStatefulSet,
-		OperationRetries:         agentContext.Cfg.WaitSubnetPoolMaxRetries,
-		OperationGapDuration:     time.Duration(agentContext.Cfg.WaitSubnetPoolTime) * time.Second,
+		EnableIPv4:                           agentContext.Cfg.EnableIPv4,
+		EnableIPv6:                           agentContext.Cfg.EnableIPv6,
+		EnableSpiderSubnet:                   agentContext.Cfg.EnableSpiderSubnet,
+		EnableAutoPoolForApplication:         agentContext.Cfg.EnableAutoPoolForApplication,
+		EnableStatefulSet:                    agentContext.Cfg.EnableStatefulSet,
+		EnableKubevirtStaticIP:               agentContext.Cfg.EnableKubevirtStaticIP,
+		EnableReleaseConflictIPsForStateless: agentContext.Cfg.EnableReleaseConflictIPsForStateless,
+		OperationRetries:                     agentContext.Cfg.WaitSubnetPoolMaxRetries,
+		OperationGapDuration:                 time.Duration(agentContext.Cfg.WaitSubnetPoolTime) * time.Second,
+		AgentNamespace:                       agentContext.Cfg.AgentPodNamespace,
 	}
 	if len(agentContext.Cfg.MultusClusterNetwork) != 0 {
-		ipamConfig.MultusClusterNetwork = pointer.String(agentContext.Cfg.MultusClusterNetwork)
+		ipamConfig.MultusClusterNetwork = ptr.To(agentContext.Cfg.MultusClusterNetwork)
 	}
 	ipam, err := ipam.NewIPAM(
 		ipamConfig,
@@ -152,6 +186,7 @@ func DaemonMain() {
 		agentContext.PodManager,
 		agentContext.StsManager,
 		agentContext.SubnetManager,
+		agentContext.KubevirtManager,
 	)
 	if nil != err {
 		logger.Fatal(err.Error())
@@ -252,7 +287,6 @@ func WatchSignal(sigCh chan os.Signal) {
 				logger.Sugar().Errorf("Failed to shut down spiderpool-agent UNIX server: %v", err)
 			}
 		}
-
 		// others...
 
 	}
@@ -340,10 +374,19 @@ func initAgentServiceManagers(ctx context.Context) {
 	}
 	agentContext.StsManager = statefulSetManager
 
+	logger.Debug("Begin to initialize Kubevirt manager")
+	kubevirtManager := kubevirtmanager.NewKubevirtManager(
+		agentContext.CRDManager.GetClient(),
+		agentContext.CRDManager.GetAPIReader(),
+	)
+	agentContext.KubevirtManager = kubevirtManager
+
 	logger.Debug("Begin to initialize Endpoint manager")
 	endpointManager, err := workloadendpointmanager.NewWorkloadEndpointManager(
 		agentContext.CRDManager.GetClient(),
 		agentContext.CRDManager.GetAPIReader(),
+		agentContext.Cfg.EnableStatefulSet,
+		agentContext.Cfg.EnableKubevirtStaticIP,
 	)
 	if err != nil {
 		logger.Fatal(err.Error())
@@ -363,7 +406,8 @@ func initAgentServiceManagers(ctx context.Context) {
 	logger.Debug("Begin to initialize IPPool manager")
 	ipPoolManager, err := ippoolmanager.NewIPPoolManager(
 		ippoolmanager.IPPoolManagerConfig{
-			MaxAllocatedIPs: &agentContext.Cfg.IPPoolMaxAllocatedIPs,
+			MaxAllocatedIPs:        &agentContext.Cfg.IPPoolMaxAllocatedIPs,
+			EnableKubevirtStaticIP: agentContext.Cfg.EnableKubevirtStaticIP,
 		},
 		agentContext.CRDManager.GetClient(),
 		agentContext.CRDManager.GetAPIReader(),
@@ -388,4 +432,27 @@ func initAgentServiceManagers(ctx context.Context) {
 	} else {
 		logger.Info("Feature SpiderSubnet is disabled")
 	}
+}
+
+// sysctlConfig set default sysctl configs,Notice: ignore not exist sysctl configs as
+// possible.
+func sysctlConfig(enableIPv4, enableIPv6 bool) error {
+	// setup default sysctl config
+	for _, sc := range sysctl.DefaultSysctlConfig {
+		if (enableIPv4 && sc.IsIPv4) || (enableIPv6 && sc.IsIPv6) {
+			logger.Info("Setup sysctl", zap.String("sysctl", sc.Name), zap.String("value", sc.Value))
+			err := sysctl.SetSysctl(sc.Name, sc.Value)
+			if err == nil {
+				logger.Debug("success to setup sysctl", zap.String("sysctl", sc.Name), zap.String("value", sc.Value))
+				continue
+			}
+
+			if !errors.Is(err, os.ErrNotExist) {
+				logger.Error("failed to setup sysctl", zap.String("sysctl", sc.Name), zap.String("value", sc.Value), zap.Error(err))
+				return err
+			}
+			logger.Warn("skip to setup sysctl", zap.String("sysctl", sc.Name), zap.String("value", sc.Value), zap.Error(err))
+		}
+	}
+	return nil
 }

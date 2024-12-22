@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/pflag"
 	"go.uber.org/atomic"
 	"gopkg.in/yaml.v3"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/spidernet-io/spiderpool/api/v1/agent/client"
@@ -21,6 +22,7 @@ import (
 	"github.com/spidernet-io/spiderpool/pkg/constant"
 	"github.com/spidernet-io/spiderpool/pkg/ipam"
 	"github.com/spidernet-io/spiderpool/pkg/ippoolmanager"
+	"github.com/spidernet-io/spiderpool/pkg/kubevirtmanager"
 	"github.com/spidernet-io/spiderpool/pkg/logutils"
 	"github.com/spidernet-io/spiderpool/pkg/namespacemanager"
 	"github.com/spidernet-io/spiderpool/pkg/nodemanager"
@@ -28,6 +30,7 @@ import (
 	"github.com/spidernet-io/spiderpool/pkg/reservedipmanager"
 	"github.com/spidernet-io/spiderpool/pkg/statefulsetmanager"
 	"github.com/spidernet-io/spiderpool/pkg/subnetmanager"
+	spiderpooltypes "github.com/spidernet-io/spiderpool/pkg/types"
 	"github.com/spidernet-io/spiderpool/pkg/workloadendpointmanager"
 )
 
@@ -47,15 +50,18 @@ var envInfo = []envConf{
 	{"GIT_COMMIT_VERSION", "", false, &agentContext.Cfg.CommitVersion, nil, nil},
 	{"GIT_COMMIT_TIME", "", false, &agentContext.Cfg.CommitTime, nil, nil},
 	{"VERSION", "", false, &agentContext.Cfg.AppVersion, nil, nil},
-	{"GOLANG_ENV_MAXPROCS", "8", false, nil, nil, &agentContext.Cfg.GoMaxProcs},
 
 	{"SPIDERPOOL_LOG_LEVEL", logutils.LogInfoLevelStr, true, &agentContext.Cfg.LogLevel, nil, nil},
 	{"SPIDERPOOL_ENABLED_METRIC", "false", false, nil, &agentContext.Cfg.EnableMetric, nil},
+	{"SPIDERPOOL_ENABLED_RDMA_METRIC", "false", false, nil, &agentContext.Cfg.EnableRDMAMetric, nil},
 	{"SPIDERPOOL_ENABLED_DEBUG_METRIC", "false", false, nil, &agentContext.Cfg.EnableDebugLevelMetric, nil},
+	{"SPIDERPOOL_POD_NAMESPACE", "", true, &agentContext.Cfg.AgentPodNamespace, nil, nil},
+	{"SPIDERPOOL_POD_NAME", "", true, &agentContext.Cfg.AgentPodName, nil, nil},
 	{"SPIDERPOOL_HEALTH_PORT", "5710", true, &agentContext.Cfg.HttpPort, nil, nil},
 	{"SPIDERPOOL_METRIC_HTTP_PORT", "5711", true, &agentContext.Cfg.MetricHttpPort, nil, nil},
 	{"SPIDERPOOL_GOPS_LISTEN_PORT", "5712", false, &agentContext.Cfg.GopsListenPort, nil, nil},
 	{"SPIDERPOOL_PYROSCOPE_PUSH_SERVER_ADDRESS", "", false, &agentContext.Cfg.PyroscopeAddress, nil, nil},
+	{"SPIDERPOOL_ENABLED_RELEASE_CONFLICT_IPS", "true", true, nil, &agentContext.Cfg.EnableReleaseConflictIPsForStateless, nil},
 
 	{"SPIDERPOOL_IPPOOL_MAX_ALLOCATED_IPS", "5000", true, nil, nil, &agentContext.Cfg.IPPoolMaxAllocatedIPs},
 	{"SPIDERPOOL_WAIT_SUBNET_POOL_TIME_IN_SECOND", "2", false, nil, nil, &agentContext.Cfg.WaitSubnetPoolTime},
@@ -68,15 +74,17 @@ type Config struct {
 	CommitVersion string
 	CommitTime    string
 	AppVersion    string
-	GoMaxProcs    int
-
 	// flags
 	ConfigPath string
 
 	// env
-	LogLevel               string
-	EnableMetric           bool
-	EnableDebugLevelMetric bool
+	LogLevel                             string
+	EnableMetric                         bool
+	EnableRDMAMetric                     bool
+	EnableDebugLevelMetric               bool
+	AgentPodNamespace                    string
+	AgentPodName                         string
+	EnableReleaseConflictIPsForStateless bool
 
 	HttpPort         string
 	MetricHttpPort   string
@@ -90,16 +98,7 @@ type Config struct {
 	MultusClusterNetwork string
 
 	// configmap
-	IpamUnixSocketPath                string   `yaml:"ipamUnixSocketPath"`
-	EnableIPv4                        bool     `yaml:"enableIPv4"`
-	EnableIPv6                        bool     `yaml:"enableIPv6"`
-	EnableStatefulSet                 bool     `yaml:"enableStatefulSet"`
-	EnableSpiderSubnet                bool     `yaml:"enableSpiderSubnet"`
-	ClusterDefaultIPv4IPPool          []string `yaml:"clusterDefaultIPv4IPPool"`
-	ClusterDefaultIPv6IPPool          []string `yaml:"clusterDefaultIPv6IPPool"`
-	ClusterDefaultIPv4Subnet          []string `yaml:"clusterDefaultIPv4Subnet"`
-	ClusterDefaultIPv6Subnet          []string `yaml:"clusterDefaultIPv6Subnet"`
-	ClusterSubnetDefaultFlexibleIPNum int      `yaml:"clusterSubnetDefaultFlexibleIPNumber"`
+	spiderpooltypes.SpiderpoolConfigmapConfig
 }
 
 type AgentContext struct {
@@ -121,6 +120,10 @@ type AgentContext struct {
 	PodManager        podmanager.PodManager
 	StsManager        statefulsetmanager.StatefulSetManager
 	SubnetManager     subnetmanager.SubnetManager
+	KubevirtManager   kubevirtmanager.KubevirtManager
+
+	// k8s client
+	ClientSet *kubernetes.Clientset
 
 	// handler
 	HttpServer        *server.Server
@@ -189,7 +192,7 @@ func (ac *AgentContext) LoadConfigmap() error {
 		return fmt.Errorf("failed to read configmap file, error: %v", err)
 	}
 
-	err = yaml.Unmarshal(configmapBytes, &ac.Cfg)
+	err = yaml.Unmarshal(configmapBytes, &ac.Cfg.SpiderpoolConfigmapConfig)
 	if nil != err {
 		return fmt.Errorf("failed to parse configmap, error: %v", err)
 	}

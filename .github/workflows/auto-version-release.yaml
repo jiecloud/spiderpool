@@ -52,7 +52,7 @@ jobs:
 
 
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ env.RUN_TAG }}
 
@@ -68,7 +68,7 @@ jobs:
 
       # if branch exists, the action will no fail, and it output created=false
       - name: release Y branch
-        uses: peterjgrainger/action-create-branch@v2.4.0
+        uses: peterjgrainger/action-create-branch@v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -100,8 +100,7 @@ jobs:
     uses: ./.github/workflows/call-release-chart.yaml
     with:
       ref: ${{ needs.get-tag.outputs.tag }}
-      # will submit on step update-github-pages
-      submit: false
+      submit: true
     secrets: inherit
 
   release-doc:
@@ -109,16 +108,6 @@ jobs:
     uses: ./.github/workflows/call-release-doc.yaml
     with:
       ref: ${{ needs.get-tag.outputs.tag }}
-      # will submit on step update-github-pages
-      submit: false
-    secrets: inherit
-
-  update-github-pages:
-    needs: [release-doc, release-chart]
-    uses: ./.github/workflows/call-update-githubpages.yaml
-    with:
-      site_artifact_name: ${{ needs.release-doc.outputs.artifact }}
-      chart_artifact_name: ${{ needs.release-chart.outputs.artifact }}
     secrets: inherit
 
   release-changelog:
@@ -126,6 +115,20 @@ jobs:
     uses: ./.github/workflows/call-release-changelog.yaml
     with:
       dest_tag: ${{ needs.get-tag.outputs.tag }}
+    secrets: inherit
+
+  call-upgrade-test:
+    needs: [build-release-image, get-tag]
+    uses: ./.github/workflows/auto-upgrade-ci.yaml
+    with:
+      dest_tag: ${{ needs.get-tag.outputs.tag }}
+    secrets: inherit
+
+  update-release-version:
+    needs: [build-release-image, get-tag]
+    uses: ./.github/workflows/call-release-version.yaml
+    with:
+      ref: ${{ needs.get-tag.outputs.tag }}
     secrets: inherit
 
   create-release:
@@ -154,7 +157,7 @@ jobs:
               exit 1
           fi
           chart_path=$( ls chart-package/*.tgz )
-          echo ::set-output name=chart_path::${chart_path}
+          echo "chart_path=${chart_path}" >> $GITHUB_ENV
           # ========== changelog
           if ! ls changelog-result/*.md &>/dev/null ; then
               echo "error, failed to find changelog "
@@ -164,13 +167,13 @@ jobs:
           cat changelog-result/*.md
           changelog_file=$( ls changelog-result/ )
           changelog_path=./changelog-result/${changelog_file}
-          echo ::set-output name=changelog_path::${changelog_path}
+          echo "changelog_path=${changelog_path}" >> $GITHUB_ENV
           cp ./changelog-result/${changelog_file} ./changelog-result/changelog.md
 
       - name: Create Release
         id: create_release
         continue-on-error: false
-        uses: ncipollo/release-action@v1.12.0
+        uses: ncipollo/release-action@v1.14.0
         with:
           artifacts: "chart-package/*"
           allowUpdates: true

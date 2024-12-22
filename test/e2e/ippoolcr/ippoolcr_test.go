@@ -7,14 +7,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/spidernet-io/spiderpool/pkg/constant"
-	spiderpoolv2beta1 "github.com/spidernet-io/spiderpool/pkg/k8s/apis/spiderpool.spidernet.io/v2beta1"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+	k8scli "sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/spidernet-io/e2eframework/tools"
+	"github.com/spidernet-io/spiderpool/pkg/constant"
+	spiderpoolv2beta1 "github.com/spidernet-io/spiderpool/pkg/k8s/apis/spiderpool.spidernet.io/v2beta1"
 	"github.com/spidernet-io/spiderpool/pkg/types"
 	"github.com/spidernet-io/spiderpool/test/e2e/common"
 )
@@ -29,56 +35,63 @@ var _ = Describe("test ippool CR", Label("ippoolCR"), func() {
 	var v4SubnetObject, v6SubnetObject *spiderpoolv2beta1.SpiderSubnet
 
 	BeforeEach(func() {
-		if frame.Info.SpiderSubnetEnabled {
-			if frame.Info.IpV4Enabled {
-				v4SubnetName, v4SubnetObject = common.GenerateExampleV4SubnetObject(20)
-				Expect(v4SubnetObject).NotTo(BeNil())
-				Expect(common.CreateSubnet(frame, v4SubnetObject)).NotTo(HaveOccurred())
-			}
-			if frame.Info.IpV6Enabled {
-				v6SubnetName, v6SubnetObject = common.GenerateExampleV6SubnetObject(20)
-				Expect(v6SubnetObject).NotTo(BeNil())
-				Expect(common.CreateSubnet(frame, v6SubnetObject)).NotTo(HaveOccurred())
-			}
-		}
 		// Init namespace name and create
 		nsName = "ns" + tools.RandomName()
-		GinkgoWriter.Printf("create namespace %v \n", nsName)
 		err := frame.CreateNamespaceUntilDefaultServiceAccountReady(nsName, common.ServiceAccountReadyTimeout)
 		Expect(err).NotTo(HaveOccurred(), "failed to create namespace %v", nsName)
 
-		// Create IPv4 pools and IPv6 pools
-		if frame.Info.IpV4Enabled {
-			v4PoolName, v4PoolObj = common.GenerateExampleIpv4poolObject(5)
-			Expect(v4PoolObj.Spec.IPs).NotTo(BeNil())
-			GinkgoWriter.Printf("Succeeded to create ippool %v \n", v4PoolObj.Name)
-			if frame.Info.SpiderSubnetEnabled {
-				ctx, cancel := context.WithTimeout(context.Background(), common.PodStartTimeout)
-				defer cancel()
-				err := common.CreateIppoolInSpiderSubnet(ctx, frame, v4SubnetName, v4PoolObj, 5)
-				Expect(err).NotTo(HaveOccurred())
-			} else {
-				Expect(common.CreateIppool(frame, v4PoolObj)).To(Succeed())
+		Eventually(func() error {
+			if frame.Info.IpV4Enabled {
+				v4PoolName, v4PoolObj = common.GenerateExampleIpv4poolObject(5)
+				if frame.Info.SpiderSubnetEnabled {
+					v4SubnetName, v4SubnetObject = common.GenerateExampleV4SubnetObject(frame, 20)
+					err = common.CreateSubnet(frame, v4SubnetObject)
+					if err != nil {
+						GinkgoWriter.Printf("Failed to create v4 Subnet %v: %v \n", v4SubnetName, err)
+						return err
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), common.PodStartTimeout)
+					defer cancel()
+					err = common.CreateIppoolInSpiderSubnet(ctx, frame, v4SubnetName, v4PoolObj, 5)
+				} else {
+					err = common.CreateIppool(frame, v4PoolObj)
+				}
+				if err != nil {
+					GinkgoWriter.Printf("Failed to create v4 IPPool %v: %v \n", v4PoolName, err)
+					return err
+				}
+				v4PoolNameList = append(v4PoolNameList, v4PoolName)
 			}
-			v4PoolNameList = append(v4PoolNameList, v4PoolName)
-		}
-		if frame.Info.IpV6Enabled {
-			v6PoolName, v6PoolObj = common.GenerateExampleIpv6poolObject(5)
-			Expect(v6PoolObj.Spec.IPs).NotTo(BeNil())
-			GinkgoWriter.Printf("Succeeded to create ippool %v \n", v6PoolObj.Name)
-			if frame.Info.SpiderSubnetEnabled {
-				ctx, cancel := context.WithTimeout(context.Background(), common.PodStartTimeout)
-				defer cancel()
-				err := common.CreateIppoolInSpiderSubnet(ctx, frame, v6SubnetName, v6PoolObj, 5)
-				Expect(err).NotTo(HaveOccurred())
-			} else {
-				Expect(common.CreateIppool(frame, v6PoolObj)).To(Succeed())
+			if frame.Info.IpV6Enabled {
+				v6PoolName, v6PoolObj = common.GenerateExampleIpv6poolObject(5)
+				if frame.Info.SpiderSubnetEnabled {
+					v6SubnetName, v6SubnetObject = common.GenerateExampleV6SubnetObject(frame, 20)
+					err = common.CreateSubnet(frame, v6SubnetObject)
+					if err != nil {
+						GinkgoWriter.Printf("Failed to create v6 Subnet %v: %v \n", v6SubnetName, err)
+						return err
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), common.PodStartTimeout)
+					defer cancel()
+					err = common.CreateIppoolInSpiderSubnet(ctx, frame, v6SubnetName, v6PoolObj, 5)
+				} else {
+					err = common.CreateIppool(frame, v6PoolObj)
+				}
+				if err != nil {
+					GinkgoWriter.Printf("Failed to create v6 IPPool %v: %v \n", v6PoolName, err)
+					return err
+				}
+				v6PoolNameList = append(v6PoolNameList, v6PoolName)
 			}
-
-			v6PoolNameList = append(v6PoolNameList, v6PoolName)
-		}
+			return nil
+		}).WithTimeout(time.Minute).WithPolling(time.Second * 3).Should(BeNil())
 
 		DeferCleanup(func() {
+			if CurrentSpecReport().Failed() {
+				GinkgoWriter.Println("If the use case fails, the cleanup step will be skipped")
+				return
+			}
+
 			GinkgoWriter.Println("Clean test ENV")
 			err = frame.DeleteNamespace(nsName)
 			Expect(err).NotTo(HaveOccurred(), "Failed to delete namespace %v, err: %v", nsName, err)
@@ -203,8 +216,8 @@ var _ = Describe("test ippool CR", Label("ippoolCR"), func() {
 		var v4Pool, v6Pool *spiderpoolv2beta1.SpiderIPPool
 
 		// Generate Invalid Gateway and Dst
-		v4InvalidGateway = common.GenerateExampleIpv4Gateway()
-		v6InvalidGateway = common.GenerateExampleIpv6Gateway()
+		v4InvalidGateway = common.GenerateRandomIPV4()
+		v6InvalidGateway = common.GenerateRandomIPV6()
 
 		annoPodIPPools := types.AnnoPodIPPoolsValue{
 			types.AnnoIPPoolItem{
@@ -352,9 +365,9 @@ var _ = Describe("test ippool CR", Label("ippoolCR"), func() {
 			for k := range podNameCleanGatewayMap {
 				ctx, cancel := context.WithTimeout(context.Background(), common.ExecCommandTimeout)
 				defer cancel()
-				checkGatewayCommand := "ip -6 r | grep 'default via' | awk '{print $3}'"
-				checkRouteDstCommand := fmt.Sprintf("ip -6 r | grep 'via' | grep -w '%s' | grep -v 'default' | awk '{print $1}'", common.NIC1)
-				checkRouteViaCommand := fmt.Sprintf("ip -6 r | grep 'via' | grep -w '%s' | grep -v 'default' | awk '{print $3}'", common.NIC1)
+				checkGatewayCommand := "ip -6 r show table main | grep -v veth0 | grep 'default via' | awk '{print $3}'"
+				checkRouteDstCommand := fmt.Sprintf("ip -6 r show table main | grep -v veth0 | grep 'via' | grep -w '%s' | grep -v 'default' | awk '{print $1}'", common.NIC1)
+				checkRouteViaCommand := fmt.Sprintf("ip -6 r show table main | grep -v veth0 | grep 'via' | grep -w '%s' | grep -v 'default' | awk '{print $3}'", common.NIC1)
 				effectiveIpv6Gw, err1 := frame.ExecCommandInPod(k, nsName, checkGatewayCommand, ctx)
 				effectiveIpv6Dst, err2 := frame.ExecCommandInPod(k, nsName, checkRouteDstCommand, ctx)
 				effectiveIpv6Via, err3 := frame.ExecCommandInPod(k, nsName, checkRouteViaCommand, ctx)
@@ -377,11 +390,153 @@ var _ = Describe("test ippool CR", Label("ippoolCR"), func() {
 		Expect(frame.DeletePod(podName2, nsName)).To(Succeed())
 	})
 
-	It("create and delete batch of ippool and check time cost", Label("D00006"), func() {
-		if frame.Info.SpiderSubnetEnabled {
-			Skip("Suitable for no subnets")
-		}
+	Context("Test IPPool namespace Affinity", Label("namespaceName"), func() {
+		var namespaceAffinityNsName string
+		BeforeEach(func() {
+			namespaceAffinityNsName = "ns-affinity" + tools.RandomName()
+			err := frame.CreateNamespaceUntilDefaultServiceAccountReady(namespaceAffinityNsName, common.ServiceAccountReadyTimeout)
+			Expect(err).NotTo(HaveOccurred(), "failed to create namespace %v", namespaceAffinityNsName)
 
+			DeferCleanup(func() {
+				if CurrentSpecReport().Failed() {
+					GinkgoWriter.Println("If the use case fails, the cleanup step will be skipped")
+					return
+				}
+
+				err = frame.DeleteNamespace(namespaceAffinityNsName)
+				Expect(err).NotTo(HaveOccurred(), "Failed to delete namespace %v, err: %v", nsName, err)
+			})
+		})
+
+		It("The namespace where the pod is located matches the namespaceName, and the IP can be assigned", Label("D00014"), func() {
+			Eventually(func() error {
+				if frame.Info.IpV4Enabled {
+					v4Pool, err := common.GetIppoolByName(frame, v4PoolObj.Name)
+					if nil != err {
+						return err
+					}
+					v4Pool.Spec.NamespaceName = []string{nsName}
+					err = frame.UpdateResource(v4Pool)
+					if nil != err {
+						return err
+					}
+					GinkgoWriter.Printf("update IPPool %s with NamespaceName %s successfully", v4Pool.Name, nsName)
+				}
+				if frame.Info.IpV6Enabled {
+					v6Pool, err := common.GetIppoolByName(frame, v6PoolObj.Name)
+					if nil != err {
+						return err
+					}
+					v6Pool.Spec.NamespaceName = []string{nsName}
+					err = frame.UpdateResource(v6Pool)
+					if nil != err {
+						return err
+					}
+					GinkgoWriter.Printf("update IPPool %s with NamespaceName %s successfully", v6Pool.Name, nsName)
+				}
+				return nil
+			}).WithTimeout(time.Minute * 3).WithPolling(time.Second * 3).Should(BeNil())
+
+			podName := "pod" + tools.RandomName()
+			podYaml := common.GenerateExamplePodYaml(podName, nsName)
+			annoPodIPPoolValue := types.AnnoPodIPPoolValue{}
+			if frame.Info.IpV4Enabled {
+				annoPodIPPoolValue.IPv4Pools = []string{v4PoolObj.Name}
+			}
+			if frame.Info.IpV6Enabled {
+				annoPodIPPoolValue.IPv6Pools = []string{v6PoolObj.Name}
+			}
+			annoPodIPPoolValueMarshal, err := json.Marshal(annoPodIPPoolValue)
+			Expect(err).NotTo(HaveOccurred())
+			podYaml.SetAnnotations(map[string]string{
+				constant.AnnoPodIPPool: string(annoPodIPPoolValueMarshal),
+			})
+			GinkgoWriter.Printf("try to create Pod with namespaceName '%s' IPPool: %s \n", nsName, podYaml.String())
+			Expect(frame.CreatePod(podYaml)).To(Succeed())
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute*1)
+			defer cancel()
+			GinkgoWriter.Printf("wait for one minute that pod %v/%v should be ready. \n", nsName, podName)
+			pod, err := frame.WaitPodStarted(podName, nsName, ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pod.Namespace).To(Equal(nsName))
+			Expect(pod.Namespace).NotTo(Equal(namespaceAffinityNsName))
+		})
+
+		It("The namespace where the pod resides does not match the namespaceName, and the IP cannot be assigned ", Label("D00015", "D00016"), func() {
+
+			Eventually(func() error {
+				if frame.Info.IpV4Enabled {
+					v4Pool, err := common.GetIppoolByName(frame, v4PoolObj.Name)
+					if nil != err {
+						return err
+					}
+					v4Pool.Spec.NamespaceName = []string{nsName}
+
+					ns, err := frame.GetNamespace(namespaceAffinityNsName)
+					if nil != err {
+						return err
+					}
+					ns.Labels = map[string]string{namespaceAffinityNsName: namespaceAffinityNsName}
+					v4Pool.Spec.NamespaceAffinity = new(v1.LabelSelector)
+					v4Pool.Spec.NamespaceAffinity.MatchLabels = ns.Labels
+
+					err = frame.UpdateResource(v4Pool)
+					if nil != err {
+						return err
+					}
+					GinkgoWriter.Printf("update IPPool %s with NamespaceName %s successfully", v4Pool.Name, namespaceAffinityNsName)
+				}
+				if frame.Info.IpV6Enabled {
+					v6Pool, err := common.GetIppoolByName(frame, v6PoolObj.Name)
+					if nil != err {
+						return err
+					}
+					v6Pool.Spec.NamespaceName = []string{nsName}
+
+					ns, err := frame.GetNamespace(namespaceAffinityNsName)
+					if nil != err {
+						return err
+					}
+					ns.Labels = map[string]string{namespaceAffinityNsName: namespaceAffinityNsName}
+					v6Pool.Spec.NamespaceAffinity = new(v1.LabelSelector)
+					v6Pool.Spec.NamespaceAffinity.MatchLabels = ns.Labels
+
+					err = frame.UpdateResource(v6Pool)
+					if nil != err {
+						return err
+					}
+					GinkgoWriter.Printf("update IPPool %s with NamespaceName %s successfully", v6Pool.Name, namespaceAffinityNsName)
+				}
+				return nil
+			}).WithTimeout(time.Minute * 3).WithPolling(time.Second * 3).Should(BeNil())
+
+			podName := "pod" + tools.RandomName()
+			GinkgoWriter.Println("namespaceName has higher priority than namespaceAffinity")
+			podYaml := common.GenerateExamplePodYaml(podName, namespaceAffinityNsName)
+			annoPodIPPoolValue := types.AnnoPodIPPoolValue{}
+			if frame.Info.IpV4Enabled {
+				annoPodIPPoolValue.IPv4Pools = []string{v4PoolObj.Name}
+			}
+			if frame.Info.IpV6Enabled {
+				annoPodIPPoolValue.IPv6Pools = []string{v6PoolObj.Name}
+			}
+			annoPodIPPoolValueMarshal, err := json.Marshal(annoPodIPPoolValue)
+			Expect(err).NotTo(HaveOccurred())
+			podYaml.SetAnnotations(map[string]string{
+				constant.AnnoPodIPPool: string(annoPodIPPoolValueMarshal),
+			})
+			GinkgoWriter.Printf("try to create Pod with namespaceName '%s' IPPool: %s \n", namespaceAffinityNsName, podYaml.String())
+			Expect(frame.CreatePod(podYaml)).To(Succeed())
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute*1)
+			defer cancel()
+			GinkgoWriter.Printf("wait for one minute that pod %v/%v would not ready. \n", namespaceAffinityNsName, podName)
+			_, err = frame.WaitPodStarted(podName, nsName, ctx)
+			Expect(err).To(HaveOccurred())
+			GinkgoWriter.Println("namespaceName has higher priority than namespaceAffinity, Even if the Pod is running in ns specified by the namespaceAffinity, the Pod still cannot run.")
+		})
+	})
+
+	It("create and delete batch of ippool and check time cost", Label("D00006"), func() {
 		var ipv4PoolNameList, ipv6PoolNameList []string
 		var err error
 		const ippoolNumber = 10
@@ -419,6 +574,618 @@ var _ = Describe("test ippool CR", Label("ippoolCR"), func() {
 			Expect(errdel).NotTo(HaveOccurred())
 			endT4 := time.Since(startT4)
 			GinkgoWriter.Printf("Time cost to delete %v ipv6 ippools is %v \n", ippoolNumber, endT4)
+		}
+	})
+
+	Context("Test multusName affinity", Label("multusName"), func() {
+		var namespace, v4PoolName, v6PoolName, dsName, spiderMultusNadName string
+		var iPv4PoolObj, iPv6PoolObj *spiderpoolv2beta1.SpiderIPPool
+		var v4SubnetName, v6SubnetName string
+		var v4SubnetObject, v6SubnetObject *spiderpoolv2beta1.SpiderSubnet
+		var spiderMultusConfig *spiderpoolv2beta1.SpiderMultusConfig
+
+		BeforeEach(func() {
+			dsName = "ds-" + common.GenerateString(10, true)
+			namespace = "ns" + tools.RandomName()
+			spiderMultusNadName = "test-multus-" + common.GenerateString(10, true)
+
+			err := frame.CreateNamespaceUntilDefaultServiceAccountReady(namespace, common.ServiceAccountReadyTimeout)
+			GinkgoWriter.Printf("create namespace %v. \n", namespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func() error {
+				ctx, cancel := context.WithTimeout(context.Background(), common.PodStartTimeout)
+				defer cancel()
+				if frame.Info.IpV4Enabled {
+					v4PoolName, iPv4PoolObj = common.GenerateExampleIpv4poolObject(1)
+					// Associate ip pool with multus name
+					iPv4PoolObj.Spec.MultusName = []string{fmt.Sprintf("%s/%s", namespace, spiderMultusNadName)}
+					if frame.Info.SpiderSubnetEnabled {
+						v4SubnetName, v4SubnetObject = common.GenerateExampleV4SubnetObject(frame, len(frame.Info.KindNodeList))
+						err = common.CreateSubnet(frame, v4SubnetObject)
+						if err != nil {
+							GinkgoWriter.Printf("Failed to create v4 Subnet %v: %v \n", v4SubnetName, err)
+							return err
+						}
+						err = common.CreateIppoolInSpiderSubnet(ctx, frame, v4SubnetName, iPv4PoolObj, len(frame.Info.KindNodeList))
+					} else {
+						err = common.CreateIppool(frame, iPv4PoolObj)
+					}
+					if err != nil {
+						GinkgoWriter.Printf("Failed to create v4 IPPool %v: %v \n", v4PoolName, err)
+						return err
+					}
+				}
+				if frame.Info.IpV6Enabled {
+					v6PoolName, iPv6PoolObj = common.GenerateExampleIpv6poolObject(len(frame.Info.KindNodeList))
+					// Associate ip pool with multus name
+					iPv6PoolObj.Spec.MultusName = []string{fmt.Sprintf("%s/%s", namespace, spiderMultusNadName)}
+					if frame.Info.SpiderSubnetEnabled {
+						v6SubnetName, v6SubnetObject = common.GenerateExampleV6SubnetObject(frame, len(frame.Info.KindNodeList))
+						err = common.CreateSubnet(frame, v6SubnetObject)
+						if err != nil {
+							GinkgoWriter.Printf("Failed to create v6 Subnet %v: %v \n", v6SubnetName, err)
+							return err
+						}
+						err = common.CreateIppoolInSpiderSubnet(ctx, frame, v6SubnetName, iPv6PoolObj, len(frame.Info.KindNodeList))
+					} else {
+						err = common.CreateIppool(frame, iPv6PoolObj)
+					}
+					if err != nil {
+						GinkgoWriter.Printf("Failed to create v6 IPPool %v: %v \n", v6PoolName, err)
+						return err
+					}
+				}
+				return nil
+			}).WithTimeout(time.Minute).WithPolling(time.Second * 3).Should(BeNil())
+
+			spiderMultusConfig = &spiderpoolv2beta1.SpiderMultusConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      spiderMultusNadName,
+					Namespace: namespace,
+				},
+				Spec: spiderpoolv2beta1.MultusCNIConfigSpec{
+					CniType: ptr.To(constant.MacvlanCNI),
+					MacvlanConfig: &spiderpoolv2beta1.SpiderMacvlanCniConfig{
+						Master: []string{common.NIC1},
+						SpiderpoolConfigPools: &spiderpoolv2beta1.SpiderpoolPools{
+							IPv4IPPool: []string{v4PoolName},
+							IPv6IPPool: []string{v6PoolName},
+						},
+					},
+					CoordinatorConfig: &spiderpoolv2beta1.CoordinatorSpec{},
+				},
+			}
+			GinkgoWriter.Printf("Generate spiderMultusConfig %v \n", spiderMultusConfig)
+			Expect(frame.CreateSpiderMultusInstance(spiderMultusConfig)).NotTo(HaveOccurred())
+			GinkgoWriter.Printf("Create spidermultus config %v/%v \n", namespace, spiderMultusNadName)
+
+			DeferCleanup(func() {
+				if CurrentSpecReport().Failed() {
+					GinkgoWriter.Println("If the use case fails, the cleanup step will be skipped")
+					return
+				}
+				GinkgoWriter.Printf("delete namespace %v. \n", namespace)
+				Expect(frame.DeleteNamespace(namespace)).NotTo(HaveOccurred())
+
+				if frame.Info.IpV4Enabled {
+					Expect(common.DeleteIPPoolByName(frame, v4PoolName)).NotTo(HaveOccurred())
+					if frame.Info.SpiderSubnetEnabled {
+						Expect(common.DeleteSubnetByName(frame, v4SubnetName)).NotTo(HaveOccurred())
+					}
+				}
+				if frame.Info.IpV6Enabled {
+					Expect(common.DeleteIPPoolByName(frame, v6PoolName)).NotTo(HaveOccurred())
+					if frame.Info.SpiderSubnetEnabled {
+						Expect(common.DeleteSubnetByName(frame, v6SubnetName)).NotTo(HaveOccurred())
+					}
+				}
+			})
+		})
+
+		It("IPPool can be allocated if it is compatible with multus, but cannot be allocated if it is not compatible.", Label("D00009", "D00010"), func() {
+			// Generate daemonset yaml and annotation
+			dsObject := common.GenerateExampleDaemonSetYaml(dsName, namespace)
+			dsObject.Spec.Template.Annotations = map[string]string{common.MultusDefaultNetwork: fmt.Sprintf("%s/%s", namespace, spiderMultusNadName)}
+			GinkgoWriter.Printf("Try to create daemonset: %v/%v \n", namespace, dsName)
+			Expect(frame.CreateDaemonSet(dsObject)).NotTo(HaveOccurred())
+
+			GinkgoWriter.Println("multusName has affinity with IPPool and can assign IP")
+			Eventually(func() bool {
+				podList, err := frame.GetPodListByLabel(dsObject.Spec.Template.Labels)
+				if err != nil {
+					GinkgoWriter.Printf("failed to get pod list by label, error is %v", err)
+					return false
+				}
+				return frame.CheckPodListRunning(podList)
+			}, common.ResourceDeleteTimeout, common.ForcedWaitingTime).Should(BeTrue())
+
+			// Create a set of daemonset again, use the default multus cr, and specify the pool with affinity to other multus cr.
+			// The daemonset will fail to create and the event will be as expected.
+			var unAffinityDsName = "un-affinit-ds-" + common.GenerateString(10, true)
+			unAffinityDsObject := common.GenerateExampleDaemonSetYaml(unAffinityDsName, namespace)
+			ippoolAnno := types.AnnoPodIPPoolValue{}
+			if frame.Info.IpV4Enabled {
+				ippoolAnno.IPv4Pools = []string{v4PoolName}
+			}
+			if frame.Info.IpV6Enabled {
+				ippoolAnno.IPv6Pools = []string{v6PoolName}
+			}
+			ippoolAnnoMarshal, err := json.Marshal(ippoolAnno)
+			Expect(err).NotTo(HaveOccurred())
+			unAffinityDsObject.Spec.Template.Annotations = map[string]string{constant.AnnoPodIPPool: string(ippoolAnnoMarshal)}
+			GinkgoWriter.Printf("Try to create daemonset: %v/%v \n", namespace, unAffinityDsName)
+			Expect(frame.CreateDaemonSet(unAffinityDsObject)).NotTo(HaveOccurred())
+
+			var podList *corev1.PodList
+			Eventually(func() bool {
+				podList, err = frame.GetPodListByLabel(unAffinityDsObject.Spec.Template.Labels)
+				if err != nil {
+					GinkgoWriter.Printf("failed to get pod list by label, error is %v", err)
+					return false
+				}
+				if len(podList.Items) != len(frame.Info.KindNodeList) {
+					return false
+				}
+				return true
+			}, common.ResourceDeleteTimeout, common.ForcedWaitingTime).Should(BeTrue())
+
+			var unmacthedMultusCRString string
+			if frame.Info.IpV6Enabled && !frame.Info.IpV4Enabled {
+				unmacthedMultusCRString = fmt.Sprintf("The spec.multusName %v in the IPPool %v used by the Pod interface eth0 is not matched", iPv6PoolObj.Spec.MultusName, v6PoolName)
+			} else {
+				unmacthedMultusCRString = fmt.Sprintf("The spec.multusName %v in the IPPool %v used by the Pod interface eth0 is not matched", iPv4PoolObj.Spec.MultusName, v4PoolName)
+			}
+			GinkgoWriter.Printf("unmacthedMultusCRString: %v \n", unmacthedMultusCRString)
+
+			GinkgoWriter.Println("multusName has no affinity with IPPool and cannot assign IP")
+			for _, pod := range podList.Items {
+				ctx, cancel := context.WithTimeout(context.Background(), common.EventOccurTimeout)
+				defer cancel()
+				err = frame.WaitExceptEventOccurred(ctx, common.OwnerPod, pod.Name, pod.Namespace, unmacthedMultusCRString)
+				Expect(err).NotTo(HaveOccurred(), "Failedto get event, error is %v", err)
+			}
+		})
+
+		It("multiple NICs with NIC name specified", func() {
+			// Generate daemonset yaml and annotation
+			additionalNIC := "macvlan1"
+			annoPodIPPoolsValue := types.AnnoPodIPPoolsValue{
+				{NIC: "eth0"}, {NIC: additionalNIC},
+			}
+			if frame.Info.IpV4Enabled {
+				annoPodIPPoolsValue[0].IPv4Pools = []string{common.SpiderPoolIPv4PoolDefault}
+				annoPodIPPoolsValue[1].IPv4Pools = []string{v4PoolName}
+			}
+			if frame.Info.IpV6Enabled {
+				annoPodIPPoolsValue[0].IPv6Pools = []string{common.SpiderPoolIPv6PoolDefault}
+				annoPodIPPoolsValue[1].IPv6Pools = []string{v6PoolName}
+			}
+			ippoolsAnno, err := json.Marshal(annoPodIPPoolsValue)
+			Expect(err).NotTo(HaveOccurred())
+
+			dsObject := common.GenerateExampleDaemonSetYaml(dsName, namespace)
+			dsObject.Spec.Template.Annotations = map[string]string{
+				// Parse network name (i.e. <namespace>/<network name>@<ifname>)
+				common.MultusNetworks:   fmt.Sprintf("%s/%s@%s", namespace, spiderMultusNadName, additionalNIC),
+				constant.AnnoPodIPPools: string(ippoolsAnno),
+			}
+			GinkgoWriter.Printf("Try to create daemonset with multiple NICs and NIC name specified: %v/%v \n", namespace, dsName)
+			Expect(frame.CreateDaemonSet(dsObject)).NotTo(HaveOccurred())
+
+			GinkgoWriter.Println("check daemonset pod running with multiple NICs and NIC name specified")
+			Eventually(func() bool {
+				podList, err := frame.GetPodListByLabel(dsObject.Spec.Template.Labels)
+				if err != nil {
+					GinkgoWriter.Printf("failed to get pod list by label, error is %v", err)
+					return false
+				}
+				return frame.CheckPodListRunning(podList)
+			}, common.ResourceDeleteTimeout, common.ForcedWaitingTime).Should(BeTrue())
+		})
+
+		It("multiple NICs with NIC name unspecified", func() {
+			// Generate daemonset yaml and annotation
+			additionalNIC := "macvlan1"
+			annoPodIPPoolsValue := types.AnnoPodIPPoolsValue{{}, {}}
+			if frame.Info.IpV4Enabled {
+				annoPodIPPoolsValue[0].IPv4Pools = []string{common.SpiderPoolIPv4PoolDefault}
+				annoPodIPPoolsValue[1].IPv4Pools = []string{v4PoolName}
+			}
+			if frame.Info.IpV6Enabled {
+				annoPodIPPoolsValue[0].IPv6Pools = []string{common.SpiderPoolIPv6PoolDefault}
+				annoPodIPPoolsValue[1].IPv6Pools = []string{v6PoolName}
+			}
+			ippoolsAnno, err := json.Marshal(annoPodIPPoolsValue)
+			Expect(err).NotTo(HaveOccurred())
+
+			dsObject := common.GenerateExampleDaemonSetYaml(dsName, namespace)
+			dsObject.Spec.Template.Annotations = map[string]string{
+				// Parse network name (i.e. <namespace>/<network name>@<ifname>)
+				common.MultusNetworks:   fmt.Sprintf("%s/%s@%s", namespace, spiderMultusNadName, additionalNIC),
+				constant.AnnoPodIPPools: string(ippoolsAnno),
+			}
+			GinkgoWriter.Printf("Try to create daemonset with multiple NICs and NIC name unspecified: %v/%v \n", namespace, dsName)
+			Expect(frame.CreateDaemonSet(dsObject)).NotTo(HaveOccurred())
+
+			GinkgoWriter.Println("check daemonset pod running with multiple NICs and NIC name unspecified")
+			Eventually(func() bool {
+				podList, err := frame.GetPodListByLabel(dsObject.Spec.Template.Labels)
+				if err != nil {
+					GinkgoWriter.Printf("failed to get pod list by label, error is %v", err)
+					return false
+				}
+				return frame.CheckPodListRunning(podList)
+			}, common.ResourceDeleteTimeout, common.ForcedWaitingTime).Should(BeTrue())
+		})
+	})
+
+	// This use case is used to test the affinity of nodeName in ippool.
+	// The use case design is as follows:
+	// 1. Create ippool cr and associate the node through ippool.spec.nodeName
+	// 2. Create a set of daemonSet
+	// 3. The Pod is scheduled to a node that has affinity with IPPool, and the Pod can run normally.
+	// 4. The Pod is scheduled to a node that does not have affinity with IPPool, and the Pod cannot run.
+	Context("Test nodeName affinity", func() {
+		var namespace, v4PoolName, v6PoolName, dsName string
+		var iPv4PoolObj, iPv6PoolObj *spiderpoolv2beta1.SpiderIPPool
+		var v4SubnetName, v6SubnetName string
+		var v4SubnetObject, v6SubnetObject *spiderpoolv2beta1.SpiderSubnet
+		var nodeNameMatchedNode, nodeAffinityMatchedNode *corev1.Node
+		var podAnnoMarshalString string
+
+		BeforeEach(func() {
+			nodeList, err := frame.GetNodeList()
+			Expect(err).NotTo(HaveOccurred())
+			if len(nodeList.Items) < 2 {
+				Skip("Not enough nodes.")
+			}
+			nodeNameMatchedNode = &nodeList.Items[0]
+			nodeAffinityMatchedNode = &nodeList.Items[1]
+			GinkgoWriter.Printf("Set the nodeName with the IPpool to %+v", nodeNameMatchedNode.Name)
+			GinkgoWriter.Printf("Set the nodeAffinity with the IPpool to %+v", nodeAffinityMatchedNode.Name)
+
+			dsName = "ds-" + common.GenerateString(10, true)
+			namespace = "ns" + tools.RandomName()
+			err = frame.CreateNamespaceUntilDefaultServiceAccountReady(namespace, common.ServiceAccountReadyTimeout)
+			GinkgoWriter.Printf("create namespace %v. \n", namespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			podIppoolsAnno := types.AnnoPodIPPoolValue{}
+			Eventually(func() error {
+				ctx, cancel := context.WithTimeout(context.Background(), common.PodStartTimeout)
+				defer cancel()
+				if frame.Info.IpV4Enabled {
+					v4PoolName, iPv4PoolObj = common.GenerateExampleIpv4poolObject(1)
+					// Associate IPPool with nodeName
+					iPv4PoolObj.Spec.NodeName = []string{nodeNameMatchedNode.Name}
+					iPv4PoolObj.Spec.NodeAffinity = new(v1.LabelSelector)
+					iPv4PoolObj.Spec.NodeAffinity.MatchLabels = nodeAffinityMatchedNode.GetLabels()
+					if frame.Info.SpiderSubnetEnabled {
+						v4SubnetName, v4SubnetObject = common.GenerateExampleV4SubnetObject(frame, len(frame.Info.KindNodeList))
+						err = common.CreateSubnet(frame, v4SubnetObject)
+						if err != nil {
+							GinkgoWriter.Printf("Failed to create v4 Subnet %v: %v \n", v4SubnetName, err)
+							return err
+						}
+						err = common.CreateIppoolInSpiderSubnet(ctx, frame, v4SubnetName, iPv4PoolObj, len(frame.Info.KindNodeList))
+					} else {
+						err = common.CreateIppool(frame, iPv4PoolObj)
+					}
+					if err != nil {
+						GinkgoWriter.Printf("Failed to create v4 IPPool %v: %v \n", v4PoolName, err)
+						return err
+					}
+					podIppoolsAnno.IPv4Pools = []string{v4PoolName}
+				}
+
+				if frame.Info.IpV6Enabled {
+					v6PoolName, iPv6PoolObj = common.GenerateExampleIpv6poolObject(len(frame.Info.KindNodeList))
+					// Associate IPPool with nodeName
+					iPv6PoolObj.Spec.NodeName = []string{nodeNameMatchedNode.Name}
+					iPv6PoolObj.Spec.NodeAffinity = new(v1.LabelSelector)
+					iPv6PoolObj.Spec.NodeAffinity.MatchLabels = nodeAffinityMatchedNode.GetLabels()
+					if frame.Info.SpiderSubnetEnabled {
+						v6SubnetName, v6SubnetObject = common.GenerateExampleV6SubnetObject(frame, len(frame.Info.KindNodeList))
+						err = common.CreateSubnet(frame, v6SubnetObject)
+						if err != nil {
+							GinkgoWriter.Printf("Failed to create v6 Subnet %v: %v \n", v6SubnetName, err)
+							return err
+						}
+						err = common.CreateIppoolInSpiderSubnet(ctx, frame, v6SubnetName, iPv6PoolObj, len(frame.Info.KindNodeList))
+					} else {
+						err = common.CreateIppool(frame, iPv6PoolObj)
+					}
+					if err != nil {
+						GinkgoWriter.Printf("Failed to create v6 IPPool %v: %v \n", v6PoolName, err)
+						return err
+					}
+					podIppoolsAnno.IPv6Pools = []string{v6PoolName}
+				}
+				return nil
+			}).WithTimeout(time.Minute).WithPolling(time.Second * 3).Should(BeNil())
+			podAnnoMarshal, err := json.Marshal(podIppoolsAnno)
+			Expect(err).NotTo(HaveOccurred())
+			podAnnoMarshalString = string(podAnnoMarshal)
+
+			DeferCleanup(func() {
+				if CurrentSpecReport().Failed() {
+					GinkgoWriter.Println("If the use case fails, the cleanup step will be skipped")
+					return
+				}
+				GinkgoWriter.Printf("delete namespace %v. \n", namespace)
+				Expect(frame.DeleteNamespace(namespace)).NotTo(HaveOccurred())
+
+				if frame.Info.IpV4Enabled {
+					Expect(common.DeleteIPPoolByName(frame, v4PoolName)).NotTo(HaveOccurred())
+					if frame.Info.SpiderSubnetEnabled {
+						Expect(common.DeleteSubnetByName(frame, v4SubnetName)).NotTo(HaveOccurred())
+					}
+				}
+				if frame.Info.IpV6Enabled {
+					Expect(common.DeleteIPPoolByName(frame, v6PoolName)).NotTo(HaveOccurred())
+					if frame.Info.SpiderSubnetEnabled {
+						Expect(common.DeleteSubnetByName(frame, v6SubnetName)).NotTo(HaveOccurred())
+					}
+				}
+			})
+		})
+
+		It("If IPPool has affinity with nodeName, it can allocate IP, but if it has no affinity, it cannot allocate IP.", Label("D00011", "D00012", "D00013"), func() {
+			// Generate daemonset yaml with annotation
+			dsObject := common.GenerateExampleDaemonSetYaml(dsName, namespace)
+			dsObject.Spec.Template.Annotations = map[string]string{constant.AnnoPodIPPool: podAnnoMarshalString}
+			GinkgoWriter.Printf("Try to create daemonset: %v/%v \n", namespace, dsName)
+			err := frame.CreateDaemonSet(dsObject)
+			Expect(err).NotTo(HaveOccurred())
+
+			var podList *corev1.PodList
+			// Wait for Pod replicas on all nodes to be pulled up.
+			Eventually(func() bool {
+				podList, err = frame.GetPodListByLabel(dsObject.Spec.Template.Labels)
+				if err != nil {
+					GinkgoWriter.Printf("failed to get pod list by label, error is %v", err)
+					return false
+				}
+				return len(podList.Items) == len(frame.Info.KindNodeList)
+			}, common.PodStartTimeout, common.ForcedWaitingTime).Should(BeTrue())
+
+			for _, pod := range podList.Items {
+				if pod.Spec.NodeName == nodeNameMatchedNode.Name {
+					// Schedule to a node that has affinity with IPPool, the Pod can run normally.
+					Eventually(func() bool {
+						podOnMatchedNode, err := frame.GetPod(pod.Name, pod.Namespace)
+						if err != nil {
+							GinkgoWriter.Printf("failed to get pod, error is %v", err)
+							return false
+						}
+						return frame.CheckPodListRunning(&corev1.PodList{Items: []corev1.Pod{*podOnMatchedNode}})
+					}, common.PodStartTimeout, common.ForcedWaitingTime).Should(BeTrue())
+				} else {
+					if pod.Spec.NodeName == nodeAffinityMatchedNode.Name {
+						GinkgoWriter.Println("nodeName has higher priority than nodeAffinity")
+					}
+					GinkgoWriter.Println("If the Pod is scheduled to a node that does not match IPPool.nodeName, it will not be able to run.")
+					var unmacthedNodeNameString string
+					if frame.Info.IpV6Enabled && !frame.Info.IpV4Enabled {
+						unmacthedNodeNameString = fmt.Sprintf("unmatched Node name of IPPool %v", v6PoolName)
+					} else {
+						unmacthedNodeNameString = fmt.Sprintf("unmatched Node name of IPPool %v", v4PoolName)
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), common.EventOccurTimeout)
+					defer cancel()
+					err := frame.WaitExceptEventOccurred(ctx, common.OwnerPod, pod.Name, namespace, unmacthedNodeNameString)
+					Expect(err).NotTo(HaveOccurred())
+				}
+			}
+		})
+	})
+
+	It("Manually ippool inherits subnet attributes", Label("D00008"), func() {
+		if !frame.Info.SpiderSubnetEnabled {
+			Skip("SpiderSubnet feature is disabled, just skip this case")
+		}
+
+		crName := "demo"
+		wg := sync.WaitGroup{}
+
+		// for IPv4, create IPPool first and create Subnet later
+		if frame.Info.IpV4Enabled {
+			wg.Add(1)
+			go func() {
+				defer GinkgoRecover()
+				defer wg.Done()
+
+				poolName := fmt.Sprintf("%s-%d-ippool", crName, constant.IPv4)
+				subnetName := fmt.Sprintf("%s-%d-subnet", crName, constant.IPv4)
+				subnet := "172.16.0.0/16"
+				ips := "172.16.0.2"
+				gateway := "172.16.0.1"
+				route := spiderpoolv2beta1.Route{
+					Dst: "172.17.0.0/16",
+					Gw:  "172.16.41.1",
+				}
+
+				demoSpiderIPPool := &spiderpoolv2beta1.SpiderIPPool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: poolName,
+					},
+					Spec: spiderpoolv2beta1.IPPoolSpec{
+						IPVersion: ptr.To(constant.IPv4),
+						Subnet:    subnet,
+						IPs:       []string{ips},
+					},
+				}
+				GinkgoWriter.Printf("Generate SpiderIPPool %s, try to create it\n", demoSpiderIPPool.String())
+				err := frame.CreateResource(demoSpiderIPPool)
+				Expect(err).NotTo(HaveOccurred())
+				time.Sleep(time.Second * 5)
+
+				demoSpiderSubnet := &spiderpoolv2beta1.SpiderSubnet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: subnetName,
+					},
+					Spec: spiderpoolv2beta1.SubnetSpec{
+						IPVersion: ptr.To(constant.IPv4),
+						Subnet:    subnet,
+						IPs:       []string{ips},
+						Gateway:   ptr.To(gateway),
+						Routes:    []spiderpoolv2beta1.Route{route},
+					},
+				}
+				GinkgoWriter.Printf("Generate SpiderSubnet %s, try to create it\n", demoSpiderSubnet.String())
+				err = frame.CreateResource(demoSpiderSubnet)
+				if nil != err {
+					if strings.Contains(err.Error(), "overlaps") {
+						Skip(fmt.Sprintf("the SpiderSubnet %v overlaps: %v", demoSpiderSubnet.String(), err.Error()))
+					}
+					Fail(fmt.Sprintf("failed to create SpiderSubnet, error: %s", err))
+				}
+
+				Eventually(func() error {
+					demoSpiderIPPool, err = common.GetIppoolByName(frame, poolName)
+					if nil != err {
+						return err
+					}
+					_, ok := demoSpiderIPPool.Labels[constant.LabelIPPoolOwnerSpiderSubnet]
+					if !ok {
+						return fmt.Errorf("IPPool %s is not controlled by subnet, wait for Subnet's reconcile to take in", poolName)
+					}
+					return nil
+				}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 5).Should(BeNil())
+
+				GinkgoWriter.Println("check whether the IPPool inherits the Subnet properties")
+				Expect(demoSpiderIPPool.Spec.Gateway).To(Equal(demoSpiderSubnet.Spec.Gateway))
+				Expect(demoSpiderIPPool.Spec.Routes).To(Equal(demoSpiderSubnet.Spec.Routes))
+
+				GinkgoWriter.Println("clean up Subnet")
+				err = frame.DeleteResource(demoSpiderSubnet)
+				Expect(err).NotTo(HaveOccurred())
+			}()
+		}
+
+		// for IPv6, create Subnet first and create IPPool later
+		if frame.Info.IpV6Enabled {
+			wg.Add(1)
+			go func() {
+				defer GinkgoRecover()
+				defer wg.Done()
+
+				poolName := fmt.Sprintf("%s-%d-ippool", crName, constant.IPv6)
+				subnetName := fmt.Sprintf("%s-%d-subnet", crName, constant.IPv6)
+				subnet := "fd00:172:16::/64"
+				ips := "fd00:172:16::2"
+				gateway := "fd00:172:16::1"
+				route := spiderpoolv2beta1.Route{
+					Dst: "fd00:172:17::/64",
+					Gw:  "fd00:172:16::100",
+				}
+
+				demoSpiderSubnet := &spiderpoolv2beta1.SpiderSubnet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: subnetName,
+					},
+					Spec: spiderpoolv2beta1.SubnetSpec{
+						IPVersion: ptr.To(constant.IPv6),
+						Subnet:    subnet,
+						IPs:       []string{ips},
+						Gateway:   ptr.To(gateway),
+						Routes:    []spiderpoolv2beta1.Route{route},
+					},
+				}
+				GinkgoWriter.Printf("Generate SpiderSubnet %s, try to create it\n", demoSpiderSubnet.String())
+				err := frame.CreateResource(demoSpiderSubnet)
+				if nil != err {
+					if strings.Contains(err.Error(), "overlaps") {
+						Skip(fmt.Sprintf("the SpiderSubnet %v overlaps: %v", demoSpiderSubnet.String(), err.Error()))
+					}
+					Fail(fmt.Sprintf("failed to create SpiderSubnet, error: %s", err))
+				}
+				time.Sleep(time.Second * 5)
+
+				demoSpiderIPPool := &spiderpoolv2beta1.SpiderIPPool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: poolName,
+					},
+					Spec: spiderpoolv2beta1.IPPoolSpec{
+						IPVersion: ptr.To(constant.IPv6),
+						Subnet:    subnet,
+						IPs:       []string{ips},
+					},
+				}
+				GinkgoWriter.Printf("Generate SpiderIPPool %s, try to create it\n", demoSpiderIPPool.String())
+				err = frame.CreateResource(demoSpiderIPPool)
+				Expect(err).NotTo(HaveOccurred())
+
+				Eventually(func() error {
+					demoSpiderIPPool, err = common.GetIppoolByName(frame, poolName)
+					if nil != err {
+						return err
+					}
+					_, ok := demoSpiderIPPool.Labels[constant.LabelIPPoolOwnerSpiderSubnet]
+					if !ok {
+						return fmt.Errorf("IPPool %s is not controlled by subnet, wait for Subnet's reconcile to take in", poolName)
+					}
+					return nil
+				}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 5).Should(BeNil())
+
+				GinkgoWriter.Println("check whether the IPPool inherits the Subnet properties")
+				Expect(demoSpiderIPPool.Spec.Gateway).To(Equal(demoSpiderSubnet.Spec.Gateway))
+				Expect(demoSpiderIPPool.Spec.Routes).To(Equal(demoSpiderSubnet.Spec.Routes))
+
+				GinkgoWriter.Println("clean up Subnet")
+				err = frame.DeleteResource(demoSpiderSubnet)
+				Expect(err).NotTo(HaveOccurred())
+			}()
+		}
+		wg.Wait()
+	})
+
+	It("Large IPv6 pool", Label("D00017"), func() {
+		if frame.Info.IpV6Enabled {
+			poolName := "large-ipv6-pool"
+
+			pool := &spiderpoolv2beta1.SpiderIPPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: poolName,
+				},
+				Spec: spiderpoolv2beta1.IPPoolSpec{
+					IPVersion:  ptr.To(constant.IPv6),
+					Subnet:     "fd12:3456:789a::/48",
+					IPs:        []string{"fd12:3456:789a:baba::1-fd12:3456:789a:ffff:ffff:ffff:ffff:ffff"},
+					ExcludeIPs: []string{"fd12:3456:789a:baba::1-fd12:3456:789a:baba::10"},
+				},
+			}
+			GinkgoWriter.Printf("Generate SpiderIPPool %s, try to create it\n", pool.String())
+			err := frame.CreateResource(pool)
+			Expect(err).NotTo(HaveOccurred())
+			time.Sleep(time.Second * 5)
+
+			key := k8scli.ObjectKeyFromObject(pool)
+			err = frame.GetResource(key, pool)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(pool.Status.TotalIPCount).To(Equal(ptr.To(int64(9223372036854775807))))
+
+			deployName := "large-ipv6-deploy"
+			common.CreateDeployWithPodAnnoation(frame, deployName, nsName, 2, common.NIC1, make([]string, 0), []string{poolName})
+			GinkgoWriter.Printf("Create deployment: %v/%v \n", nsName, deployName)
+
+			time.Sleep(time.Second * 5)
+
+			err = frame.GetResource(key, pool)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pool.Status.AllocatedIPCount).To(Equal(ptr.To(int64(2))))
+			Expect(pool.Status.TotalIPCount).To(Equal(ptr.To(int64(9223372036854775807))))
+
+			Expect(frame.DeleteDeploymentUntilFinish(deployName, nsName, common.ResourceDeleteTimeout)).To(Succeed())
+			GinkgoWriter.Printf("Succeeded to delete deployment %v/%v \n", nsName, deployName)
+
+			time.Sleep(time.Second * 5)
+
+			GinkgoWriter.Println("clean up IPPool")
+			err = frame.DeleteResource(pool)
+			Expect(err).NotTo(HaveOccurred())
 		}
 	})
 })

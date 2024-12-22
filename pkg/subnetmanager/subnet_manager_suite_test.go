@@ -45,17 +45,12 @@ func TestSubnetManager(t *testing.T) {
 	defer mockCtrl.Finish()
 
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "SubnetManager Suite", Label("subnetmanager", "unitest"))
+	RunSpecs(t, "SubnetManager Suite", Label("subnetmanager", "unittest"))
 }
 
 var _ = BeforeSuite(func() {
-	_, err := metric.InitMetric(context.TODO(), constant.SpiderpoolController, false, false)
-	Expect(err).NotTo(HaveOccurred())
-	err = metric.InitSpiderpoolControllerMetrics(context.TODO())
-	Expect(err).NotTo(HaveOccurred())
-
 	scheme = runtime.NewScheme()
-	err = spiderpoolv2beta1.AddToScheme(scheme)
+	err := spiderpoolv2beta1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = kruiseapi.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
@@ -66,7 +61,13 @@ var _ = BeforeSuite(func() {
 			subnet := raw.(*spiderpoolv2beta1.SpiderSubnet)
 			return []string{subnet.GetObjectMeta().GetName()}
 		}).
+		WithStatusSubresource(&spiderpoolv2beta1.SpiderSubnet{}).
 		Build()
+
+	_, err = metric.InitMetric(context.TODO(), constant.SpiderpoolController, false, false)
+	Expect(err).NotTo(HaveOccurred())
+	err = metric.InitSpiderpoolControllerMetrics(context.TODO())
+	Expect(err).NotTo(HaveOccurred())
 
 	tracker = k8stesting.NewObjectTracker(scheme, k8sscheme.Codecs.UniversalDecoder())
 	fakeAPIReader = fake.NewClientBuilder().
@@ -76,6 +77,7 @@ var _ = BeforeSuite(func() {
 			subnet := raw.(*spiderpoolv2beta1.SpiderSubnet)
 			return []string{subnet.GetObjectMeta().GetName()}
 		}).
+		WithStatusSubresource(&spiderpoolv2beta1.SpiderSubnet{}).
 		Build()
 
 	fakeDynamicClient = dynamicfake.NewSimpleDynamicClient(scheme)

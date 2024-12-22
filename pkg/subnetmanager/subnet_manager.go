@@ -12,7 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -143,10 +143,10 @@ func (sm *subnetManager) ReconcileAutoIPPool(ctx context.Context, pool *spiderpo
 				Name: applicationinformers.AutoPoolName(podController.Name, autoPoolProperty.IPVersion, autoPoolProperty.IfName, podController.UID),
 			},
 			Spec: spiderpoolv2beta1.IPPoolSpec{
-				IPVersion:   pointer.Int64(autoPoolProperty.IPVersion),
-				Subnet:      subnet.Spec.Subnet,
-				Gateway:     subnet.Spec.Gateway,
-				Vlan:        subnet.Spec.Vlan,
+				IPVersion: ptr.To(autoPoolProperty.IPVersion),
+				Subnet:    subnet.Spec.Subnet,
+				Gateway:   subnet.Spec.Gateway,
+				//Vlan:        subnet.Spec.Vlan,
 				Routes:      subnet.Spec.Routes,
 				PodAffinity: ippoolmanager.NewAutoPoolPodAffinity(podController),
 			},
@@ -256,10 +256,9 @@ func (sm *subnetManager) preAllocateIPsFromSubnet(ctx context.Context, subnet *s
 				return nil, err
 			}
 
-			// TODO(Icarus9913): optimize it
 			// If we have difference sets, which means the subnet updated its status successfully in the last shrink operation but the next ippool update operation failed.
 			// In the situation, the ippool may allocate or release one of ips that subnet updated. So, we should correct the subnet status.
-			if len(spiderpoolip.IPsDiffSet(poolAllocatedIPs, subnetPoolIPs, false)) != 0 {
+			if spiderpoolip.IsDiffIPSet(poolAllocatedIPs, subnetPoolIPs) {
 				log.Sugar().Warnf("the last whole auto-created pool scale operation interrupted, try to correct SpiderSubnet %s status %s IP allocations", subnet.Name, pool.Name)
 				poolTotalIPs, err := spiderpoolip.ParseIPRanges(ipVersion, pool.Spec.IPs)
 				if nil != err {
@@ -304,7 +303,6 @@ func (sm *subnetManager) preAllocateIPsFromSubnet(ctx context.Context, subnet *s
 				return nil, fmt.Errorf("%w: failed to parse IPPool %s Status AllocatedIPs: %v", constant.ErrWrongInput, pool.Name, err)
 			}
 
-			// TODO(Icarus9913): optimize it
 			// shrink: free IP number >= return IP Num
 			// when it needs to scale down IP, enough IP is released to make sure it scale down successfully
 			if len(subnetPoolIPs)-len(poolIPAllocations) >= len(subnetPoolIPs)-desiredIPNum {
@@ -330,7 +328,7 @@ func (sm *subnetManager) preAllocateIPsFromSubnet(ctx context.Context, subnet *s
 				}
 				subnetControlledIPPools[pool.Name] = spiderpoolv2beta1.PoolIPPreAllocation{
 					IPs:         poolIPRange,
-					Application: pointer.String(applicationinformers.ApplicationNamespacedName(podController.AppNamespacedName)),
+					Application: ptr.To(applicationinformers.ApplicationNamespacedName(podController.AppNamespacedName)),
 				}
 				marshalSubnetAllocatedIPPools, err := convert.MarshalSubnetAllocatedIPPools(subnetControlledIPPools)
 				if nil != err {
@@ -388,7 +386,7 @@ func (sm *subnetManager) preAllocateIPsFromSubnet(ctx context.Context, subnet *s
 
 	subnetControlledIPPools[pool.Name] = spiderpoolv2beta1.PoolIPPreAllocation{
 		IPs:         allocateIPRange,
-		Application: pointer.String(applicationinformers.ApplicationNamespacedName(podController.AppNamespacedName)),
+		Application: ptr.To(applicationinformers.ApplicationNamespacedName(podController.AppNamespacedName)),
 	}
 	marshalSubnetAllocatedIPPools, err := convert.MarshalSubnetAllocatedIPPools(subnetControlledIPPools)
 	if nil != err {
@@ -409,8 +407,7 @@ func (sm *subnetManager) preAllocateIPsFromSubnet(ctx context.Context, subnet *s
 }
 
 func subnetStatusCount(subnet *spiderpoolv2beta1.SpiderSubnet) (totalCount, allocatedCount int64) {
-	// total IP Count
-	subnetTotalIPs, _ := spiderpoolip.AssembleTotalIPs(*subnet.Spec.IPVersion, subnet.Spec.IPs, subnet.Spec.ExcludeIPs)
+	s, _ := spiderpoolip.NewCIDR(subnet.Spec.Subnet, subnet.Spec.IPs, subnet.Spec.ExcludeIPs)
 
 	if subnet.Status.ControlledIPPools == nil {
 		return 0, 0
@@ -427,5 +424,5 @@ func subnetStatusCount(subnet *spiderpoolv2beta1.SpiderSubnet) (totalCount, allo
 		tmpIPs, _ := spiderpoolip.ParseIPRanges(*subnet.Spec.IPVersion, poolAllocation.IPs)
 		allocatedIPCount += int64(len(tmpIPs))
 	}
-	return int64(len(subnetTotalIPs)), allocatedIPCount
+	return int64(s.TotalIPInt()), allocatedIPCount
 }
